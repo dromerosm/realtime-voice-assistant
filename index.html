@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>Realtime Voice Assistant</title>
+    <script type="module" src="/src/client/main.ts"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <p class="eyebrow">OpenAI Realtime Voice POC</p>
+        <h1>Asistente de voz en tiempo real</h1>
+        <p class="hero-copy">
+          WebRTC directo con <code>gpt-realtime-1.5</code>, transcript en vivo y
+          memoria durante la sesión actual.
+        </p>
+      </section>
+
+      <section class="panel controls-panel">
+        <div class="controls">
+          <button id="connectButton" class="primary">Connect</button>
+          <button id="hangupButton" class="secondary" disabled>Hang up</button>
+          <button id="adminButton" class="ghost" hidden>Admin</button>
+          <button id="resetMemoryButton" class="ghost" hidden>Reset memory</button>
+        </div>
+        <div class="status-grid">
+          <div>
+            <span class="status-label">Estado</span>
+            <strong id="statusValue">idle</strong>
+          </div>
+          <div>
+            <span class="status-label">Sesión</span>
+            <strong id="sessionValue">sin conexión</strong>
+          </div>
+          <div>
+            <span class="status-label">Último uso</span>
+            <strong id="usageValue">n/d</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel ambient-panel">
+        <div class="panel-header">
+          <h2>Pulso de voz</h2>
+          <p>
+            HUD radial inspirado en JARVIS: se intensifica con la voz real del
+            asistente y se queda en modo escaneo cuando está escuchando.
+          </p>
+        </div>
+        <div class="ambient-stage">
+          <canvas id="ambientCanvas" class="ambient-canvas" aria-hidden="true"></canvas>
+          <div class="ambient-overlay">
+            <span id="ambientModeBadge" class="ambient-badge">idle</span>
+            <p class="ambient-caption">Anillos, barrido y pulsos sincronizados con la locución.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="memoryPanel" class="panel memory-panel" hidden>
+        <div class="panel-header">
+          <h2>Memoria persistente</h2>
+          <p>
+            Hechos y preferencias que la app ha guardado para reutilizarlos en
+            conversaciones futuras.
+          </p>
+        </div>
+        <ol id="memoryList" class="memory-list">
+          <li class="empty-state">Todavía no hay memoria persistente guardada.</li>
+        </ol>
+      </section>
+
+      <section class="panel transcript-panel">
+        <div class="panel-header">
+          <h2>Transcript</h2>
+          <p>
+            El modelo recuerda este contexto durante la sesión y puede cargar memoria
+            persistente ligera al arrancar una nueva conversación.
+          </p>
+        </div>
+        <ol id="transcriptList" class="transcript-list">
+          <li class="empty-state">Todavía no hay turnos.</li>
+        </ol>
+      </section>
+
+      <section class="panel notes-panel">
+        <h2>Notas</h2>
+        <ul>
+          <li>El audio viaja por WebRTC directamente entre navegador y OpenAI.</li>
+          <li>
+            La conversación se reinicia al recargar, pero pueden mantenerse
+            preferencias y hechos estables mediante memoria persistente ligera.
+          </li>
+          <li>
+            El transcript de entrada usa transcripción asíncrona del audio para
+            depuración.
+          </li>
+          <li>El borrado de memoria persistente requiere token admin.</li>
+        </ul>
+      </section>
+    </main>
+
+    <dialog id="adminDialog" class="admin-dialog">
+      <form id="adminDialogForm" class="admin-dialog-form" method="dialog">
+        <h2>Acceso admin</h2>
+        <p>Introduce el token admin para habilitar acciones restringidas.</p>
+        <label class="admin-dialog-label" for="adminTokenInput">Token</label>
+        <input
+          id="adminTokenInput"
+          name="adminToken"
+          type="password"
+          autocomplete="current-password"
+        />
+        <div class="admin-dialog-actions">
+          <button type="button" id="adminDialogCancel" class="secondary">Cancelar</button>
+          <button type="submit" id="adminDialogConfirm" class="primary">Entrar</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>
