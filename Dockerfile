@@ -12,9 +12,9 @@ RUN npm run build
 FROM node:24-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-ENV PORT=3000
-RUN mkdir -p /data
+RUN mkdir -p /app/data
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/app.config.json ./app.config.json
 EXPOSE 3000
 CMD ["node", "dist/server/server.js"]

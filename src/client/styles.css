@@ -32,6 +32,61 @@ code {
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.login-gate {
+  width: min(34rem, calc(100vw - 1.5rem));
+  min-height: 100vh;
+  margin: 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem 0;
+}
+
+.login-panel {
+  width: 100%;
+  padding: 1.5rem;
+  border: 1px solid rgba(245, 243, 235, 0.12);
+  border-radius: 1.35rem;
+  background:
+    radial-gradient(circle at top right, rgba(237, 138, 56, 0.12), transparent 36%),
+    radial-gradient(circle at bottom left, rgba(60, 132, 241, 0.1), transparent 34%),
+    rgba(10, 12, 18, 0.82);
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(10px);
+}
+
+.login-form {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 1.15rem;
+}
+
+.login-label {
+  color: #d9dee7;
+  font-size: 0.9rem;
+}
+
+.login-status {
+  min-height: 1.4rem;
+  margin: 0.9rem 0 0;
+  color: #9ba5b6;
+}
+
+.login-status[data-state="error"] {
+  color: #f3c1be;
+}
+
 .app-shell {
   width: min(960px, calc(100vw - 2rem));
   margin: 0 auto;
@@ -144,7 +199,8 @@ input {
 .memory-panel,
 .notes-panel,
 .captcha-panel,
-.ambient-panel {
+.ambient-panel,
+.web-search-panel {
   padding: 1.2rem;
 }
 
@@ -209,6 +265,67 @@ input {
   max-width: 22rem;
   color: rgba(194, 233, 255, 0.88);
   text-shadow: 0 0 22px rgba(25, 92, 158, 0.28);
+}
+
+.web-search-stage {
+  margin-top: 1rem;
+  padding: 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(96, 195, 255, 0.18);
+  background:
+    radial-gradient(circle at top right, rgba(57, 154, 255, 0.12), transparent 36%),
+    linear-gradient(180deg, rgba(7, 16, 26, 0.94), rgba(10, 16, 27, 0.98));
+}
+
+.web-search-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.web-search-meta strong {
+  color: #d9f4ff;
+  font-size: 0.98rem;
+}
+
+.web-search-meta span {
+  color: #84d9ff;
+  font-size: 0.86rem;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+.web-search-query {
+  margin: 0.55rem 0 0;
+  color: #c9d1dd;
+}
+
+.web-search-progress {
+  position: relative;
+  overflow: hidden;
+  height: 0.42rem;
+  margin-top: 0.9rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.web-search-progress-bar {
+  position: absolute;
+  inset: 0 auto 0 -35%;
+  width: 35%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(76, 176, 255, 0), #6fd6ff, rgba(76, 176, 255, 0));
+  animation: web-search-scan 1.2s linear infinite;
+}
+
+@keyframes web-search-scan {
+  from {
+    transform: translateX(0%);
+  }
+
+  to {
+    transform: translateX(385%);
+  }
 }
 
 .transcript-list {
@@ -368,6 +485,15 @@ input {
 }
 
 @media (max-width: 720px) {
+  .login-gate {
+    width: min(100vw - 1rem, 34rem);
+    padding-top: 1rem;
+  }
+
+  .login-panel {
+    padding: 1.2rem;
+  }
+
   .app-shell {
     width: min(100vw - 1rem, 960px);
     padding-top: 1rem;

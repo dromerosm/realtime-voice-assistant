@@ -1,60 +1,55 @@
 import { createReadStream } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, scryptSync, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, extname, join, normalize } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { loadAppRuntimeConfig } from "./app-config.js";
 
-const port = Number.parseInt(process.env.PORT ?? "3000", 10);
-const host = process.env.HOST ?? "0.0.0.0";
+const appRuntimeConfig = loadAppRuntimeConfig();
+const port = appRuntimeConfig.server.port;
+const host = appRuntimeConfig.server.host;
 const openAiApiKey = process.env.OPENAI_API_KEY;
-const realtimeModel = process.env.OPENAI_REALTIME_MODEL ?? "gpt-realtime-1.5";
-const realtimeVoice = process.env.OPENAI_REALTIME_VOICE ?? "marin";
-const transcriptionModel =
-  process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe";
-const turnstileSiteKey = process.env.TURNSTILE_SITE_KEY ?? "";
+const realtimeModel = appRuntimeConfig.realtime.model;
+const realtimeVoice = appRuntimeConfig.realtime.voice;
+const transcriptionModel = appRuntimeConfig.realtime.transcriptionModel;
+const turnstileSiteKey = appRuntimeConfig.turnstile.siteKey;
 const turnstileSecretKey = process.env.TURNSTILE_SECRET_KEY ?? "";
-const allowedOrigins = (process.env.OPENAI_REALTIME_ALLOWED_ORIGINS ?? "")
-  .split(",")
-  .map((value) => value.trim())
-  .filter(Boolean);
-const clientSecretTtlSeconds = Number.parseInt(
-  process.env.OPENAI_REALTIME_CLIENT_SECRET_TTL_SECONDS ?? "120",
-  10
-);
-const tokenRateLimitWindowMs = Number.parseInt(
-  process.env.OPENAI_REALTIME_TOKEN_RATE_LIMIT_WINDOW_MS ?? "60000",
-  10
-);
-const tokenRateLimitMaxRequests = Number.parseInt(
-  process.env.OPENAI_REALTIME_TOKEN_RATE_LIMIT_MAX_REQUESTS ?? "5",
-  10
-);
-const memoryDbPath = process.env.MEMORY_DB_PATH ?? "/data/memory.sqlite";
-const memoryModel = process.env.OPENAI_MEMORY_MODEL ?? "gpt-5-mini";
-const memoryEnabled = !["0", "false", "no"].includes(
-  (process.env.OPENAI_MEMORY_ENABLED ?? "true").trim().toLowerCase()
-);
+const allowedOrigins = appRuntimeConfig.realtime.allowedOrigins;
+const trustProxyHeaders = appRuntimeConfig.proxy.trustHeaders;
+const trustedProxyIpHeader = appRuntimeConfig.proxy.ipHeader;
+const clientSecretTtlSeconds = appRuntimeConfig.realtime.clientSecretTtlSeconds;
+const tokenRateLimitWindowMs = appRuntimeConfig.realtime.tokenRateLimitWindowMs;
+const tokenRateLimitMaxRequests = appRuntimeConfig.realtime.tokenRateLimitMaxRequests;
+const memoryDbPath = appRuntimeConfig.memory.dbPath;
+const memoryModel = appRuntimeConfig.memory.model;
+const webSearchModel = appRuntimeConfig.webSearch.model;
+const webSearchEnabled = appRuntimeConfig.webSearch.enabled;
+const webSearchCacheTtlMs = appRuntimeConfig.webSearch.cacheTtlMs;
+const memoryEnabled = appRuntimeConfig.memory.enabled;
 const memoryAdminToken = process.env.MEMORY_ADMIN_TOKEN ?? "";
 const memoryQueueConcurrency = Math.max(
   1,
-  Math.min(2, Number.parseInt(process.env.MEMORY_QUEUE_CONCURRENCY ?? "1", 10) || 1)
+  Math.min(2, appRuntimeConfig.memory.queueConcurrency || 1)
 );
-const adminSessionTtlSeconds = Number.parseInt(
-  process.env.ADMIN_SESSION_TTL_SECONDS ?? "43200",
-  10
-);
+const appLoginPasswordHash = process.env.APP_LOGIN_PASSWORD_HASH?.trim() ?? "";
+const appLoginEnabled = appRuntimeConfig.appLogin.enabled || Boolean(appLoginPasswordHash);
+const configuredAppSessionSecret = process.env.APP_SESSION_SECRET?.trim() ?? "";
+const appSessionTtlSeconds = appRuntimeConfig.appLogin.sessionTtlSeconds;
+const appLoginRateLimitWindowMs = appRuntimeConfig.appLogin.rateLimitWindowMs;
+const appLoginRateLimitMaxAttempts = appRuntimeConfig.appLogin.rateLimitMaxAttempts;
+const adminSessionTtlSeconds = appRuntimeConfig.admin.sessionTtlSeconds;
 const configuredAdminSessionSecret = process.env.ADMIN_SESSION_SECRET?.trim() ?? "";
-const instructions =
-  process.env.OPENAI_REALTIME_INSTRUCTIONS ??
-  "You are a concise real-time voice assistant. Keep answers short, natural, and conversational. Remember details shared by the user during the current session.";
+const instructions = appRuntimeConfig.realtime.instructions;
 
 const memoryConfidenceThreshold = 0.78;
 const memoryContextLimit = 10;
 const memoryContextCharBudget = 1_100;
 const maxTranscriptLength = 2_000;
+const appSessionCookieName = "rt_app_session";
 const adminSessionCookieName = "rt_admin_session";
+const appSessionSecret = configuredAppSessionSecret || appLoginPasswordHash;
 const adminSessionSecret = configuredAdminSessionSecret || memoryAdminToken;
 
 const __filename = fileURLToPath(import.meta.url);
@@ -93,8 +88,17 @@ type MemoryIngestRequestBody = {
   transcript?: string;
 };
 
+type WebSearchRequestBody = {
+  query?: string;
+  freshness?: "auto" | "recent" | "today" | "general";
+};
+
 type AdminSessionRequestBody = {
   token?: string;
+};
+
+type AppSessionRequestBody = {
+  password?: string;
 };
 
 type PersistedMemoryRow = {
@@ -144,12 +148,47 @@ type RateLimitEntry = {
 type ResponsesApiResponse = {
   output_text?: string;
   output?: Array<{
+    id?: string;
     type?: string;
+    status?: string;
+    role?: string;
+    name?: string;
+    arguments?: string;
+    action?: {
+      sources?: Array<{
+        title?: string;
+        url?: string;
+      }>;
+    };
     content?: Array<{
       type?: string;
       text?: string;
+      value?: string;
+      annotations?: Array<{
+        type?: string;
+        title?: string;
+        url?: string;
+      }>;
     }>;
   }>;
+};
+
+type WebSearchResult = {
+  query: string;
+  freshness: "auto" | "recent" | "today" | "general";
+  answer: string;
+  bullets: string[];
+  sources: Array<{
+    title: string;
+    url: string;
+  }>;
+  checked_at: string;
+  cached: boolean;
+};
+
+type CachedWebSearchEntry = {
+  expiresAt: number;
+  result: WebSearchResult;
 };
 
 type MemoryStore = {
@@ -165,15 +204,56 @@ type MemoryStore = {
 
 const memoryKinds = new Set<MemoryKind>(["name", "preference", "profile_fact", "relationship"]);
 const tokenRateLimit = new Map<string, RateLimitEntry>();
+const appLoginRateLimit = new Map<string, RateLimitEntry>();
 const memoryQueue: MemoryIngestTask[] = [];
+const webSearchCache = new Map<string, CachedWebSearchEntry>();
 let activeMemoryWorkers = 0;
 
-const buildSecurityHeaders = () => ({
-  "Referrer-Policy": "strict-origin-when-cross-origin",
-  "X-Content-Type-Options": "nosniff",
-  "X-Frame-Options": "DENY",
-  "Permissions-Policy": "microphone=(self), camera=(), geolocation=()"
-});
+const trustedProxyIpHeaders = new Set(["cf-connecting-ip", "x-real-ip", "x-forwarded-for"]);
+
+if (trustedProxyIpHeader && !trustedProxyIpHeaders.has(trustedProxyIpHeader)) {
+  throw new Error(
+    "TRUST_PROXY_IP_HEADER must be one of: cf-connecting-ip, x-real-ip, x-forwarded-for."
+  );
+}
+
+const buildContentSecurityPolicy = () => {
+  const scriptSources = ["'self'"];
+  const connectSources = ["'self'", "https://api.openai.com"];
+  const frameSources = ["'none'"];
+
+  if (turnstileSiteKey) {
+    scriptSources.push("https://challenges.cloudflare.com");
+    connectSources.push("https://challenges.cloudflare.com");
+    frameSources.splice(0, frameSources.length, "'self'", "https://challenges.cloudflare.com");
+  }
+
+  return [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    `script-src ${scriptSources.join(" ")}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self'",
+    `connect-src ${connectSources.join(" ")}`,
+    "media-src 'self' blob:",
+    "worker-src 'self' blob:",
+    `frame-src ${frameSources.join(" ")}`,
+    "form-action 'self'"
+  ].join("; ");
+};
+
+const buildSecurityHeaders = () => {
+  return {
+    "Content-Security-Policy": buildContentSecurityPolicy(),
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Permissions-Policy": "microphone=(self), camera=(), geolocation=()"
+  };
+};
 
 const sendJson = (response: ServerResponse, statusCode: number, body: unknown) => {
   response.writeHead(statusCode, {
@@ -193,10 +273,29 @@ const sendText = (response: ServerResponse, statusCode: number, body: string) =>
   response.end(body);
 };
 
+const readHeaderValue = (request: IncomingMessage, headerName: string) => {
+  const rawValue = request.headers[headerName];
+  if (typeof rawValue === "string") {
+    return rawValue;
+  }
+
+  if (Array.isArray(rawValue)) {
+    return rawValue[0] ?? "";
+  }
+
+  return "";
+};
+
 const getClientIp = (request: IncomingMessage) => {
-  const forwardedFor = request.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0]?.trim() ?? request.socket.remoteAddress ?? "unknown";
+  if (trustProxyHeaders && trustedProxyIpHeader) {
+    const forwardedValue = readHeaderValue(request, trustedProxyIpHeader).trim();
+    if (forwardedValue) {
+      if (trustedProxyIpHeader === "x-forwarded-for") {
+        return forwardedValue.split(",")[0]?.trim() ?? request.socket.remoteAddress ?? "unknown";
+      }
+
+      return forwardedValue;
+    }
   }
 
   return request.socket.remoteAddress ?? "unknown";
@@ -242,22 +341,27 @@ const isAllowedOrigin = (request: IncomingMessage) => {
   return allowedOrigins.includes(origin);
 };
 
-const checkRateLimit = (key: string) => {
+const checkRateLimit = (
+  store: Map<string, RateLimitEntry>,
+  key: string,
+  windowMs: number,
+  maxRequests: number
+) => {
   const now = Date.now();
-  const current = tokenRateLimit.get(key);
+  const current = store.get(key);
 
   if (!current || current.resetAt <= now) {
-    tokenRateLimit.set(key, {
+    store.set(key, {
       count: 1,
-      resetAt: now + tokenRateLimitWindowMs
+      resetAt: now + windowMs
     });
     return {
       allowed: true,
-      retryAfterSeconds: Math.ceil(tokenRateLimitWindowMs / 1000)
+      retryAfterSeconds: Math.ceil(windowMs / 1000)
     };
   }
 
-  if (current.count >= tokenRateLimitMaxRequests) {
+  if (current.count >= maxRequests) {
     return {
       allowed: false,
       retryAfterSeconds: Math.max(1, Math.ceil((current.resetAt - now) / 1000))
@@ -265,7 +369,7 @@ const checkRateLimit = (key: string) => {
   }
 
   current.count += 1;
-  tokenRateLimit.set(key, current);
+  store.set(key, current);
   return {
     allowed: true,
     retryAfterSeconds: Math.max(1, Math.ceil((current.resetAt - now) / 1000))
@@ -337,26 +441,102 @@ const parseCookieHeader = (cookieHeader: string | undefined) => {
   );
 };
 
-const signAdminSessionValue = (value: string) =>
-  createHmac("sha256", adminSessionSecret).update(value).digest("hex");
+const parseScryptHash = (value: string) => {
+  const [algorithm, saltBase64, derivedKeyBase64] = value.split("$");
+  if (algorithm !== "scrypt" || !saltBase64 || !derivedKeyBase64) {
+    return null;
+  }
 
-const createAdminSessionCookie = () => {
-  const expiresAt = Math.floor(Date.now() / 1000) + adminSessionTtlSeconds;
-  const value = `admin:${expiresAt}`;
-  const signature = signAdminSessionValue(value);
-  return `${adminSessionCookieName}=${encodeURIComponent(`${value}.${signature}`)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${adminSessionTtlSeconds}`;
+  try {
+    const salt = Buffer.from(saltBase64, "base64");
+    const derivedKey = Buffer.from(derivedKeyBase64, "base64");
+
+    if (salt.length === 0 || derivedKey.length === 0) {
+      return null;
+    }
+
+    return {
+      salt,
+      derivedKey
+    };
+  } catch {
+    return null;
+  }
 };
 
-const createExpiredAdminSessionCookie = () =>
-  `${adminSessionCookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
+const parsedAppLoginPasswordHash = parseScryptHash(appLoginPasswordHash);
 
-const isAdminSessionAuthenticated = (request: IncomingMessage) => {
-  if (!memoryAdminToken || !adminSessionSecret) {
+if (appLoginEnabled && !appLoginPasswordHash) {
+  throw new Error("APP_LOGIN_ENABLED requires APP_LOGIN_PASSWORD_HASH.");
+}
+
+if (appLoginPasswordHash && !parsedAppLoginPasswordHash) {
+  throw new Error(
+    "APP_LOGIN_PASSWORD_HASH must use format scrypt$<saltBase64>$<derivedKeyBase64>."
+  );
+}
+
+const verifyScryptPassword = (
+  password: string,
+  parsedHash: { salt: Buffer; derivedKey: Buffer } | null
+) => {
+  if (!parsedHash) {
+    return false;
+  }
+
+  try {
+    const derivedKey = scryptSync(password, parsedHash.salt, parsedHash.derivedKey.length);
+    return timingSafeEqual(derivedKey, parsedHash.derivedKey);
+  } catch {
+    return false;
+  }
+};
+
+const isSecureRequest = (request: IncomingMessage) => {
+  if (trustProxyHeaders) {
+    const forwardedProto = readHeaderValue(request, "x-forwarded-proto");
+    if (forwardedProto) {
+      return forwardedProto
+        .split(",")
+        .map((value) => value.trim())
+        .includes("https");
+    }
+  }
+
+  return "encrypted" in request.socket && request.socket.encrypted === true;
+};
+
+const signSessionValue = (secret: string, value: string) =>
+  createHmac("sha256", secret).update(value).digest("hex");
+
+const createSignedSessionCookie = (
+  request: IncomingMessage,
+  cookieName: string,
+  secret: string,
+  scope: "app" | "admin",
+  ttlSeconds: number
+) => {
+  const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const value = `${scope}:${expiresAt}`;
+  const signature = signSessionValue(secret, value);
+  return `${cookieName}=${encodeURIComponent(`${value}.${signature}`)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${ttlSeconds}${isSecureRequest(request) ? "; Secure" : ""}`;
+};
+
+const createExpiredSessionCookie = (request: IncomingMessage, cookieName: string) =>
+  `${cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${isSecureRequest(request) ? "; Secure" : ""}`;
+
+const isSignedSessionAuthenticated = (
+  request: IncomingMessage,
+  cookieName: string,
+  secret: string,
+  scope: "app" | "admin"
+) => {
+  if (!secret) {
     return false;
   }
 
   const cookieHeader = request.headers.cookie;
-  const cookieValue = parseCookieHeader(cookieHeader).get(adminSessionCookieName);
+  const cookieValue = parseCookieHeader(cookieHeader).get(cookieName);
   if (!cookieValue) {
     return false;
   }
@@ -368,7 +548,7 @@ const isAdminSessionAuthenticated = (request: IncomingMessage) => {
 
   const value = cookieValue.slice(0, separatorIndex);
   const signature = cookieValue.slice(separatorIndex + 1);
-  const expectedSignature = signAdminSessionValue(value);
+  const expectedSignature = signSessionValue(secret, value);
 
   try {
     const signatureBuffer = Buffer.from(signature, "hex");
@@ -383,8 +563,8 @@ const isAdminSessionAuthenticated = (request: IncomingMessage) => {
     return false;
   }
 
-  const [scope, expiresAtRaw] = value.split(":");
-  if (scope !== "admin") {
+  const [actualScope, expiresAtRaw] = value.split(":");
+  if (actualScope !== scope) {
     return false;
   }
 
@@ -394,6 +574,40 @@ const isAdminSessionAuthenticated = (request: IncomingMessage) => {
   }
 
   return expiresAt > Math.floor(Date.now() / 1000);
+};
+
+const createAppSessionCookie = (request: IncomingMessage) =>
+  createSignedSessionCookie(request, appSessionCookieName, appSessionSecret, "app", appSessionTtlSeconds);
+
+const createExpiredAppSessionCookie = (request: IncomingMessage) =>
+  createExpiredSessionCookie(request, appSessionCookieName);
+
+const isAppSessionAuthenticated = (request: IncomingMessage) => {
+  if (!appLoginEnabled) {
+    return true;
+  }
+
+  return isSignedSessionAuthenticated(request, appSessionCookieName, appSessionSecret, "app");
+};
+
+const createAdminSessionCookie = (request: IncomingMessage) =>
+  createSignedSessionCookie(
+    request,
+    adminSessionCookieName,
+    adminSessionSecret,
+    "admin",
+    adminSessionTtlSeconds
+  );
+
+const createExpiredAdminSessionCookie = (request: IncomingMessage) =>
+  createExpiredSessionCookie(request, adminSessionCookieName);
+
+const isAdminSessionAuthenticated = (request: IncomingMessage) => {
+  if (!memoryAdminToken || !adminSessionSecret) {
+    return false;
+  }
+
+  return isSignedSessionAuthenticated(request, adminSessionCookieName, adminSessionSecret, "admin");
 };
 
 const extractResponseText = (payload: ResponsesApiResponse) => {
@@ -407,14 +621,29 @@ const extractResponseText = (payload: ResponsesApiResponse) => {
     }
 
     for (const part of item.content ?? []) {
-      if (part.type === "output_text" && typeof part.text === "string" && part.text.length > 0) {
-        return part.text;
+      if (typeof part.text === "string" && part.text.trim().length > 0) {
+        return part.text.trim();
+      }
+
+      if (typeof part.value === "string" && part.value.trim().length > 0) {
+        return part.value.trim();
       }
     }
   }
 
   return "";
 };
+
+const summarizeResponseShape = (payload: ResponsesApiResponse) =>
+  (payload.output ?? []).map((item) => ({
+    type: item.type ?? "unknown",
+    status: item.status ?? "unknown",
+    contentTypes: (item.content ?? []).map((part) => part.type ?? "unknown"),
+    actionSourceCount: item.action?.sources?.length ?? 0
+  }));
+
+const hasWebSearchCall = (payload: ResponsesApiResponse) =>
+  (payload.output ?? []).some((item) => item.type === "web_search_call");
 
 const sanitizeMemoryCandidate = (candidate: MemoryCandidate): MemoryCandidate | null => {
   if (!memoryKinds.has(candidate.kind)) {
@@ -620,7 +849,43 @@ const createMemoryStore = async (dbPath: string): Promise<MemoryStore> => {
 
 const memoryStore = memoryEnabled ? await createMemoryStore(memoryDbPath) : null;
 
-const buildRealtimeInstructions = () => instructions;
+const realtimeWebSearchTool = {
+  type: "function",
+  name: "web_search",
+  description:
+    "Search the web for fresh or external information when the user asks about recent events, current facts, news, changing prices, schedules, or anything you are not confident about from the conversation alone.",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      query: {
+        type: "string",
+        description: "The exact search query to run on the web."
+      },
+      freshness: {
+        type: "string",
+        enum: ["auto", "recent", "today", "general"],
+        description: "How time-sensitive the search is."
+      }
+    },
+    required: ["query", "freshness"]
+  }
+};
+
+const buildRealtimeInstructions = () =>
+  [
+    instructions,
+    webSearchEnabled
+      ? [
+          "When the user asks for recent, changing, or externally verifiable information, use the web_search tool.",
+          "The client may play a very short waiting cue while web_search runs.",
+          "After the tool result arrives, answer clearly and concisely in Spanish.",
+          "Do not use web_search for stable chit-chat or facts already available in the conversation."
+        ].join(" ")
+      : null
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
 const buildBootstrapUserMessage = (mode: "initial" | "refresh" = "initial") => {
   const memoryContext = memoryStore ? buildMemoryContextBlock(memoryStore.listMemories()) : "";
@@ -655,6 +920,8 @@ const realtimeSessionConfig = () => ({
     model: realtimeModel,
     output_modalities: ["audio"],
     instructions: buildRealtimeInstructions(),
+    tools: webSearchEnabled ? [realtimeWebSearchTool] : [],
+    tool_choice: "auto",
     max_output_tokens: 4096,
     truncation: {
       type: "retention_ratio",
@@ -685,6 +952,237 @@ const realtimeSessionConfig = () => ({
     }
   }
 });
+
+const normalizeWebSearchQuery = (query: string) => query.trim().replace(/\s+/g, " ").slice(0, 240);
+
+const normalizeWebSearchFreshness = (
+  freshness: WebSearchRequestBody["freshness"]
+): NonNullable<WebSearchRequestBody["freshness"]> => {
+  switch (freshness) {
+    case "recent":
+    case "today":
+    case "general":
+      return freshness;
+    default:
+      return "auto";
+  }
+};
+
+const getWebSearchCacheKey = (query: string, freshness: WebSearchRequestBody["freshness"]) =>
+  `${freshness ?? "auto"}::${normalizeWebSearchQuery(query).toLowerCase()}`;
+
+const getCachedWebSearchResult = (
+  query: string,
+  freshness: WebSearchRequestBody["freshness"]
+) => {
+  const cacheKey = getWebSearchCacheKey(query, freshness);
+  const cached = webSearchCache.get(cacheKey);
+  if (!cached) {
+    return null;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    webSearchCache.delete(cacheKey);
+    return null;
+  }
+
+  return {
+    ...cached.result,
+    cached: true
+  } satisfies WebSearchResult;
+};
+
+const setCachedWebSearchResult = (result: WebSearchResult) => {
+  const cacheKey = getWebSearchCacheKey(result.query, result.freshness);
+  webSearchCache.set(cacheKey, {
+    expiresAt: Date.now() + webSearchCacheTtlMs,
+    result: {
+      ...result,
+      cached: false
+    }
+  });
+};
+
+const parseWebSearchResult = (
+  payload: ResponsesApiResponse,
+  query: string,
+  freshness: NonNullable<WebSearchRequestBody["freshness"]>
+) => {
+  const outputText = extractResponseText(payload);
+  if (!outputText) {
+    throw new Error(
+      `Web search response did not include message text. Shape: ${JSON.stringify(
+        summarizeResponseShape(payload)
+      )}`
+    );
+  }
+
+  const lines = outputText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const bullets = lines
+    .filter((line) => /^[-*•]\s+/.test(line))
+    .map((line) => line.replace(/^[-*•]\s+/, "").trim())
+    .filter((line) => Boolean(line) && /[.!?)]$/.test(line))
+    .slice(0, 3);
+  const answer = lines
+    .filter((line) => !/^[-*•]\s+/.test(line))
+    .join(" ")
+    .trim()
+    .slice(0, 600);
+  const sources = new Map<string, { title: string; url: string }>();
+
+  for (const item of payload.output ?? []) {
+    for (const part of item.content ?? []) {
+      for (const annotation of part.annotations ?? []) {
+        const title = annotation.title?.trim().slice(0, 180) ?? "";
+        const url = annotation.url?.trim().slice(0, 400) ?? "";
+        if (!title || !url || sources.has(url)) {
+          continue;
+        }
+
+        sources.set(url, {
+          title,
+          url
+        });
+      }
+    }
+
+    for (const source of item.action?.sources ?? []) {
+      const title = source.title?.trim().slice(0, 180) ?? "";
+      const url = source.url?.trim().slice(0, 400) ?? "";
+      if (!title || !url || sources.has(url)) {
+        continue;
+      }
+
+      sources.set(url, {
+        title,
+        url
+      });
+    }
+  }
+
+  return {
+    query,
+    freshness,
+    answer: answer || outputText.trim().slice(0, 600),
+    bullets,
+    sources: [...sources.values()].slice(0, 3),
+    checked_at: new Date().toISOString(),
+    cached: false
+  } satisfies WebSearchResult;
+};
+
+const callWebSearch = async (
+  query: string,
+  freshness: NonNullable<WebSearchRequestBody["freshness"]>
+): Promise<WebSearchResult> => {
+  const normalizedQuery = normalizeWebSearchQuery(query);
+  const cached = getCachedWebSearchResult(normalizedQuery, freshness);
+  if (cached) {
+    return cached;
+  }
+
+  if (!openAiApiKey) {
+    throw new Error("OPENAI_API_KEY is not configured on the server.");
+  }
+
+  const searchContextSize =
+    freshness === "today" || /\b(zaragoza|procesiones?|horarios?|esta tarde|hoy|agenda)\b/i.test(query)
+      ? "medium"
+      : "low";
+  const maxOutputTokens = searchContextSize === "medium" ? 900 : 650;
+  const currentDate = new Intl.DateTimeFormat("es-ES", {
+    dateStyle: "full",
+    timeZone: "Europe/Madrid"
+  }).format(new Date());
+  const currentTime = new Intl.DateTimeFormat("es-ES", {
+    timeStyle: "short",
+    timeZone: "Europe/Madrid"
+  }).format(new Date());
+
+  const requestPayload = (mode: "primary" | "retry") => ({
+    model: webSearchModel,
+    store: false,
+    reasoning: {
+      effort: "low"
+    },
+    max_output_tokens: mode === "retry" ? maxOutputTokens + 200 : maxOutputTokens,
+    parallel_tool_calls: false,
+    tool_choice: mode === "retry" ? "required" : "auto",
+    tools: [
+      {
+        type: "web_search_preview",
+        search_context_size: searchContextSize
+      }
+    ],
+    instructions: [
+      "You are a very fast web-search sidecar for a realtime Spanish voice assistant.",
+      "Use the web search tool when needed and return only compact factual output.",
+      "Answer in Spanish.",
+      "If the query uses relative time words like hoy, esta tarde, esta noche or manana, resolve them against the current server date provided in the user message instead of asking a clarification question unless the query is still ambiguous.",
+      "For local schedules, events, processions, and anything time-sensitive, prioritize concrete times, dates, places, and official sources.",
+      "Return one short paragraph and up to three concise bullet points if useful.",
+      "Each bullet must be a complete sentence and end with punctuation.",
+      "Keep bullets short enough to avoid truncation.",
+      "Prefer short sentences and concrete dates when relevant.",
+      "If results are uncertain, say so briefly.",
+      mode === "retry"
+        ? "After using web search, you must always produce a final assistant message with a short paragraph and optional bullets. Do not stop after tool calls."
+        : null
+    ]
+      .filter(Boolean)
+      .join(" "),
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: `Consulta: ${normalizedQuery}\nFreshness: ${freshness}\nFecha actual en Madrid: ${currentDate}\nHora actual en Madrid: ${currentTime}`
+          }
+        ]
+      }
+    ]
+  });
+
+  let lastError: Error | null = null;
+
+  for (const mode of ["primary", "retry"] as const) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openAiApiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(requestPayload(mode))
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      lastError = new Error(`Web search failed with status ${response.status}: ${body}`);
+      break;
+    }
+
+    const payload = (await response.json()) as ResponsesApiResponse;
+
+    try {
+      const result = parseWebSearchResult(payload, normalizedQuery, freshness);
+      setCachedWebSearchResult(result);
+      return result;
+    } catch (error) {
+      lastError =
+        error instanceof Error ? error : new Error("Web search parsing failed unexpectedly.");
+
+      if (mode === "retry" || !hasWebSearchCall(payload)) {
+        throw lastError;
+      }
+    }
+  }
+
+  throw lastError ?? new Error("Web search failed unexpectedly.");
+};
 
 const callMemoryExtractor = async (transcript: string): Promise<MemoryExtractionResult> => {
   if (!openAiApiKey) {
@@ -866,18 +1364,108 @@ const requireAllowedOrigin = (request: IncomingMessage, response: ServerResponse
   return false;
 };
 
+const requireAppAuthentication = (request: IncomingMessage, response: ServerResponse) => {
+  if (isAppSessionAuthenticated(request)) {
+    return true;
+  }
+
+  sendJson(response, 401, {
+    error: "Authentication required.",
+    authRequired: true
+  });
+  return false;
+};
+
 const handleAppConfigRequest = (request: IncomingMessage, response: ServerResponse) => {
+  const appAuthenticated = isAppSessionAuthenticated(request);
   sendJson(response, 200, {
+    authEnabled: appLoginEnabled,
+    appAuthenticated,
     tokenEndpoint: "/api/realtime/token",
     tokenMethod: "POST",
     turnstileSiteKey: turnstileSiteKey || null,
     memoryEnabled,
     memoryResetAvailable: Boolean(memoryAdminToken),
-    adminAuthenticated: isAdminSessionAuthenticated(request)
+    adminAuthenticated: appAuthenticated && isAdminSessionAuthenticated(request)
+  });
+};
+
+const handleAppSessionCreateRequest = async (
+  request: IncomingMessage,
+  response: ServerResponse
+) => {
+  if (!appLoginEnabled) {
+    sendJson(response, 403, {
+      error: "App login is not configured."
+    });
+    return;
+  }
+
+  if (!requireAllowedOrigin(request, response)) {
+    return;
+  }
+
+  const clientIp = getClientIp(request);
+  const rateLimitState = checkRateLimit(
+    appLoginRateLimit,
+    clientIp,
+    appLoginRateLimitWindowMs,
+    appLoginRateLimitMaxAttempts
+  );
+  if (!rateLimitState.allowed) {
+    response.setHeader("Retry-After", String(rateLimitState.retryAfterSeconds));
+    sendJson(response, 429, {
+      error: "Too many login attempts. Try again later."
+    });
+    return;
+  }
+
+  try {
+    const body = await parseJsonBody<AppSessionRequestBody>(request);
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!verifyScryptPassword(password, parsedAppLoginPasswordHash)) {
+      sendJson(response, 401, {
+        error: "Invalid credentials."
+      });
+      return;
+    }
+
+    appLoginRateLimit.delete(clientIp);
+    response.setHeader("Set-Cookie", createAppSessionCookie(request));
+    sendJson(response, 200, {
+      ok: true,
+      appAuthenticated: true
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown app session error";
+    console.error("Unexpected app session create error", message);
+    sendJson(response, 400, {
+      error: "Invalid app session request."
+    });
+  }
+};
+
+const handleAppSessionDeleteRequest = (request: IncomingMessage, response: ServerResponse) => {
+  if (!requireAllowedOrigin(request, response)) {
+    return;
+  }
+
+  response.setHeader("Set-Cookie", [
+    createExpiredAppSessionCookie(request),
+    createExpiredAdminSessionCookie(request)
+  ]);
+  sendJson(response, 200, {
+    ok: true,
+    appAuthenticated: false,
+    adminAuthenticated: false
   });
 };
 
 const handleMemoryViewRequest = (request: IncomingMessage, response: ServerResponse) => {
+  if (!requireAppAuthentication(request, response)) {
+    return;
+  }
+
   const origin = request.headers.origin;
   if (origin && !requireAllowedOrigin(request, response)) {
     return;
@@ -892,6 +1480,10 @@ const handleMemoryViewRequest = (request: IncomingMessage, response: ServerRespo
 };
 
 const handleMemoryBootstrapRequest = (request: IncomingMessage, response: ServerResponse) => {
+  if (!requireAppAuthentication(request, response)) {
+    return;
+  }
+
   const origin = request.headers.origin;
   if (origin && !requireAllowedOrigin(request, response)) {
     return;
@@ -909,6 +1501,10 @@ const handleAdminSessionCreateRequest = async (
   request: IncomingMessage,
   response: ServerResponse
 ) => {
+  if (!requireAppAuthentication(request, response)) {
+    return;
+  }
+
   if (!memoryAdminToken || !adminSessionSecret) {
     sendJson(response, 403, {
       error: "Admin access is not configured."
@@ -929,7 +1525,7 @@ const handleAdminSessionCreateRequest = async (
       return;
     }
 
-    response.setHeader("Set-Cookie", createAdminSessionCookie());
+    response.setHeader("Set-Cookie", createAdminSessionCookie(request));
     sendJson(response, 200, {
       ok: true,
       adminAuthenticated: true
@@ -948,7 +1544,7 @@ const handleAdminSessionDeleteRequest = (request: IncomingMessage, response: Ser
     return;
   }
 
-  response.setHeader("Set-Cookie", createExpiredAdminSessionCookie());
+  response.setHeader("Set-Cookie", createExpiredAdminSessionCookie(request));
   sendJson(response, 200, {
     ok: true,
     adminAuthenticated: false
@@ -956,6 +1552,10 @@ const handleAdminSessionDeleteRequest = (request: IncomingMessage, response: Ser
 };
 
 const handleTokenRequest = async (request: IncomingMessage, response: ServerResponse) => {
+  if (!requireAppAuthentication(request, response)) {
+    return;
+  }
+
   if (!openAiApiKey) {
     sendJson(response, 500, {
       error: "OPENAI_API_KEY is not configured on the server."
@@ -968,7 +1568,12 @@ const handleTokenRequest = async (request: IncomingMessage, response: ServerResp
   }
 
   const clientIp = getClientIp(request);
-  const rateLimitState = checkRateLimit(clientIp);
+  const rateLimitState = checkRateLimit(
+    tokenRateLimit,
+    clientIp,
+    tokenRateLimitWindowMs,
+    tokenRateLimitMaxRequests
+  );
   if (!rateLimitState.allowed) {
     response.setHeader("Retry-After", String(rateLimitState.retryAfterSeconds));
     sendJson(response, 429, {
@@ -1035,6 +1640,41 @@ const handleTokenRequest = async (request: IncomingMessage, response: ServerResp
   }
 };
 
+const handleWebSearchRequest = async (request: IncomingMessage, response: ServerResponse) => {
+  if (!webSearchEnabled) {
+    sendJson(response, 404, {
+      error: "Web search is not enabled."
+    });
+    return;
+  }
+
+  if (!requireAllowedOrigin(request, response)) {
+    return;
+  }
+
+  try {
+    const body = await parseJsonBody<WebSearchRequestBody>(request, 12_288);
+    const query = normalizeWebSearchQuery(body.query ?? "");
+    const freshness = normalizeWebSearchFreshness(body.freshness);
+
+    if (!query) {
+      sendJson(response, 400, {
+        error: "query is required."
+      });
+      return;
+    }
+
+    const result = await callWebSearch(query, freshness);
+    sendJson(response, 200, result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown web search error";
+    console.error("Unexpected web search request error", message);
+    sendJson(response, 502, {
+      error: "Web search failed."
+    });
+  }
+};
+
 const handleMemoryIngestRequest = async (request: IncomingMessage, response: ServerResponse) => {
   if (!memoryEnabled || !memoryStore) {
     sendJson(response, 202, {
@@ -1087,6 +1727,10 @@ const handleMemoryIngestRequest = async (request: IncomingMessage, response: Ser
 };
 
 const handleMemoryResetRequest = async (request: IncomingMessage, response: ServerResponse) => {
+  if (!requireAppAuthentication(request, response)) {
+    return;
+  }
+
   if (!memoryEnabled || !memoryStore) {
     sendJson(response, 404, {
       error: "Memory is not enabled."
@@ -1127,6 +1771,10 @@ const handleMemoryResetRequest = async (request: IncomingMessage, response: Serv
 };
 
 const handleMemoryDeleteRequest = async (request: IncomingMessage, response: ServerResponse) => {
+  if (!requireAppAuthentication(request, response)) {
+    return;
+  }
+
   if (!memoryEnabled || !memoryStore) {
     sendJson(response, 404, {
       error: "Memory is not enabled."
@@ -1242,12 +1890,33 @@ const requestHandler = async (request: IncomingMessage, response: ServerResponse
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/auth/session") {
+    await handleAppSessionCreateRequest(request, response);
+    return;
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/auth/session") {
+    handleAppSessionDeleteRequest(request, response);
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/realtime/token") {
     await handleTokenRequest(request, response);
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/tools/web-search") {
+    if (!requireAppAuthentication(request, response)) {
+      return;
+    }
+    await handleWebSearchRequest(request, response);
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/memory/ingest") {
+    if (!requireAppAuthentication(request, response)) {
+      return;
+    }
     await handleMemoryIngestRequest(request, response);
     return;
   }
@@ -1272,6 +1941,13 @@ const requestHandler = async (request: IncomingMessage, response: ServerResponse
     return;
   }
 
+  if (url.pathname.startsWith("/api/")) {
+    sendJson(response, 404, {
+      error: "Not found."
+    });
+    return;
+  }
+
   if (request.method !== "GET" && request.method !== "HEAD") {
     sendText(response, 405, "Method Not Allowed");
     return;
@@ -1288,6 +1964,18 @@ server.listen(port, host, () => {
   console.log(`Realtime voice assistant listening on http://${host}:${port}`);
   console.log(`Serving client assets from ${clientDir}`);
   console.log(`Build source ${__filename}`);
+  if (trustProxyHeaders) {
+    console.log(
+      `Trusting proxy headers with client IP header ${trustedProxyIpHeader || "not configured"}`
+    );
+  } else {
+    console.log("Ignoring forwarded proxy headers for client IP and protocol");
+  }
+  if (appLoginEnabled) {
+    console.log(`App login enabled with session TTL ${appSessionTtlSeconds}s`);
+  } else {
+    console.log("App login disabled");
+  }
   if (memoryEnabled) {
     console.log(`Persistent memory enabled at ${memoryDbPath} with model ${memoryModel}`);
   } else {

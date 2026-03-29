@@ -14,12 +14,19 @@ type TokenResponse = {
 };
 
 type AppConfig = {
+  authEnabled: boolean;
+  appAuthenticated: boolean;
   tokenEndpoint: string;
   tokenMethod: "POST";
   turnstileSiteKey: string | null;
   memoryEnabled: boolean;
   memoryResetAvailable: boolean;
   adminAuthenticated: boolean;
+};
+
+type ApiErrorResponse = {
+  error?: string;
+  authRequired?: boolean;
 };
 
 type PersistedMemory = {
@@ -41,16 +48,41 @@ type MemoryBootstrapResponse = {
   bootstrapUserMessage: string | null;
 };
 
+type WebSearchFreshness = "auto" | "recent" | "today" | "general";
+
+type WebSearchResult = {
+  query: string;
+  freshness: WebSearchFreshness;
+  answer: string;
+  bullets: string[];
+  sources: Array<{
+    title: string;
+    url: string;
+  }>;
+  checked_at: string;
+  cached: boolean;
+};
+
+type RealtimeResponseMetadata = Record<string, string>;
+
+type RealtimeOutputItem = {
+  id?: string;
+  type?: string;
+  status?: string;
+  name?: string;
+  arguments?: string;
+  call_id?: string;
+  content?: Array<{ transcript?: string; text?: string }>;
+};
+
 type RealtimeEvent = {
   type: string;
   item_id?: string;
   session?: { id?: string };
   response?: {
-    output?: Array<{
-      id?: string;
-      type?: string;
-      content?: Array<{ transcript?: string; text?: string }>;
-    }>;
+    id?: string;
+    metadata?: RealtimeResponseMetadata;
+    output?: RealtimeOutputItem[];
     usage?: {
       total_tokens?: number;
       input_tokens?: number;
@@ -74,8 +106,28 @@ type RealtimeClientEvent =
       };
     }
   | {
+      type: "conversation.item.create";
+      item: {
+        type: "function_call_output";
+        call_id: string;
+        output: string;
+      };
+    }
+  | {
       type: "response.create";
       response?: {
+        conversation?: "none";
+        instructions?: string;
+        input?: Array<{
+          type: "message";
+          role: "user";
+          content: Array<{
+            type: "input_text";
+            text: string;
+          }>;
+        }>;
+        max_output_tokens?: number;
+        metadata?: RealtimeResponseMetadata;
         output_modalities?: string[];
       };
     };
@@ -87,6 +139,12 @@ type TranscriptEntry = {
   role: TranscriptRole;
   text: string;
   pending: boolean;
+};
+
+type ActiveWebSearch = {
+  callId: string;
+  query: string;
+  startedAt: number;
 };
 
 type TurnstileApi = {
@@ -109,8 +167,15 @@ declare global {
   }
 }
 
+const loginGate = document.querySelector<HTMLElement>("#loginGate");
+const appShell = document.querySelector<HTMLElement>("#appShell");
+const loginForm = document.querySelector<HTMLFormElement>("#loginForm");
+const loginPasswordInput = document.querySelector<HTMLInputElement>("#loginPasswordInput");
+const loginSubmitButton = document.querySelector<HTMLButtonElement>("#loginSubmitButton");
+const loginStatus = document.querySelector<HTMLElement>("#loginStatus");
 const connectButton = document.querySelector<HTMLButtonElement>("#connectButton");
 const hangupButton = document.querySelector<HTMLButtonElement>("#hangupButton");
+const logoutButton = document.querySelector<HTMLButtonElement>("#logoutButton");
 const adminButton = document.querySelector<HTMLButtonElement>("#adminButton");
 const resetMemoryButton = document.querySelector<HTMLButtonElement>("#resetMemoryButton");
 const statusValue = document.querySelector<HTMLElement>("#statusValue");
@@ -118,6 +183,10 @@ const sessionValue = document.querySelector<HTMLElement>("#sessionValue");
 const usageValue = document.querySelector<HTMLElement>("#usageValue");
 const ambientCanvas = document.querySelector<HTMLCanvasElement>("#ambientCanvas");
 const ambientModeBadge = document.querySelector<HTMLElement>("#ambientModeBadge");
+const webSearchPanel = document.querySelector<HTMLElement>("#webSearchPanel");
+const webSearchStatus = document.querySelector<HTMLElement>("#webSearchStatus");
+const webSearchElapsed = document.querySelector<HTMLElement>("#webSearchElapsed");
+const webSearchQuery = document.querySelector<HTMLElement>("#webSearchQuery");
 const memoryPanel = document.querySelector<HTMLElement>("#memoryPanel");
 const memoryList = document.querySelector<HTMLOListElement>("#memoryList");
 const transcriptList = document.querySelector<HTMLOListElement>("#transcriptList");
@@ -127,8 +196,15 @@ const adminTokenInput = document.querySelector<HTMLInputElement>("#adminTokenInp
 const adminDialogCancel = document.querySelector<HTMLButtonElement>("#adminDialogCancel");
 
 if (
+  !loginGate ||
+  !appShell ||
+  !loginForm ||
+  !loginPasswordInput ||
+  !loginSubmitButton ||
+  !loginStatus ||
   !connectButton ||
   !hangupButton ||
+  !logoutButton ||
   !adminButton ||
   !resetMemoryButton ||
   !statusValue ||
@@ -136,6 +212,10 @@ if (
   !usageValue ||
   !ambientCanvas ||
   !ambientModeBadge ||
+  !webSearchPanel ||
+  !webSearchStatus ||
+  !webSearchElapsed ||
+  !webSearchQuery ||
   !memoryPanel ||
   !memoryList ||
   !transcriptList ||
@@ -460,7 +540,46 @@ let turnstileWidgetId = "";
 let memoryRefreshTimer: number | null = null;
 let scheduledMemoryRefresh: number | null = null;
 const memoryEntries: PersistedMemory[] = [];
+const pendingToolCallIds = new Set<string>();
+const toolWaitEntryIds = new Map<string, string>();
+const activeWebSearches = new Map<string, ActiveWebSearch>();
+let webSearchTicker: number | null = null;
 const ambientScene = new AmbientVoiceScene(ambientCanvas, ambientModeBadge);
+const WEB_SEARCH_RESPONSE_INSTRUCTIONS =
+  'Responde en espanol. Empieza exactamente con "Un momento, lo compruebo en la web." y, a continuacion, da la respuesta final usando el resultado de la tool web_search. No digas que vas a comprobarlo mas tarde ni menciones detalles internos de tools.';
+
+const isAppAccessGranted = () => !appConfig?.authEnabled || Boolean(appConfig?.appAuthenticated);
+
+const setLoginMessage = (message: string, state: "info" | "error" = "info") => {
+  loginStatus.textContent = message;
+  loginStatus.dataset.state = state;
+};
+
+const syncAppAccessUi = () => {
+  const accessGranted = isAppAccessGranted();
+  loginGate.hidden = accessGranted;
+  appShell.hidden = !accessGranted;
+  logoutButton.hidden = !appConfig?.authEnabled || !accessGranted;
+  logoutButton.disabled = !appConfig?.authEnabled || !accessGranted;
+
+  if (!accessGranted) {
+    setLoginMessage("Introduce la contraseña para abrir la app.");
+    window.setTimeout(() => {
+      loginPasswordInput.focus();
+    }, 0);
+  } else {
+    setLoginMessage("Sesión validada.");
+  }
+};
+
+const readErrorMessage = async (response: Response, fallback: string) => {
+  try {
+    const payload = (await response.json()) as ApiErrorResponse;
+    return payload.error || fallback;
+  } catch {
+    return fallback;
+  }
+};
 
 const stopRemoteAudioMeter = () => {
   if (remoteAudioMeterFrame !== null) {
@@ -559,6 +678,204 @@ const sendBootstrapUserMessage = (text: string) => {
   });
 };
 
+const removeTranscriptEntry = (id: string) => {
+  if (!transcriptEntries.delete(id)) {
+    return;
+  }
+
+  renderTranscript();
+};
+
+const formatElapsed = (milliseconds: number) => `${(milliseconds / 1000).toFixed(1)}s`;
+
+const renderWebSearchStatus = () => {
+  const activeSearch = [...activeWebSearches.values()].sort((a, b) => a.startedAt - b.startedAt)[0];
+
+  if (!activeSearch) {
+    webSearchPanel.hidden = true;
+    webSearchStatus.textContent = "En espera";
+    webSearchElapsed.textContent = "0.0s";
+    webSearchQuery.textContent = "Sin consulta activa.";
+    return;
+  }
+
+  webSearchPanel.hidden = false;
+  webSearchStatus.textContent = "Consultando la web...";
+  webSearchElapsed.textContent = formatElapsed(performance.now() - activeSearch.startedAt);
+  webSearchQuery.textContent = activeSearch.query;
+};
+
+const syncWebSearchTicker = () => {
+  if (activeWebSearches.size === 0) {
+    if (webSearchTicker !== null) {
+      window.clearInterval(webSearchTicker);
+      webSearchTicker = null;
+    }
+    renderWebSearchStatus();
+    return;
+  }
+
+  if (webSearchTicker === null) {
+    webSearchTicker = window.setInterval(() => {
+      renderWebSearchStatus();
+    }, 100);
+  }
+
+  renderWebSearchStatus();
+};
+
+const startWebSearchStatus = (callId: string, query: string) => {
+  activeWebSearches.set(callId, {
+    callId,
+    query,
+    startedAt: performance.now()
+  });
+  syncWebSearchTicker();
+};
+
+const clearWebSearchStatus = (callId?: string) => {
+  if (callId) {
+    activeWebSearches.delete(callId);
+  } else {
+    activeWebSearches.clear();
+  }
+
+  syncWebSearchTicker();
+};
+
+const clearToolWaitFeedback = () => {
+  if (toolWaitEntryIds.size === 0) {
+    clearWebSearchStatus();
+    return;
+  }
+
+  for (const entryId of toolWaitEntryIds.values()) {
+    removeTranscriptEntry(entryId);
+  }
+
+  toolWaitEntryIds.clear();
+  clearWebSearchStatus();
+};
+
+const startToolWaitFeedback = (callId: string) => {
+  if (toolWaitEntryIds.has(callId)) {
+    return;
+  }
+
+  const entryId = `tool-wait:${callId}`;
+  toolWaitEntryIds.set(callId, entryId);
+  upsertTranscriptEntry(entryId, "assistant", () => ({
+    id: entryId,
+    role: "assistant",
+    text: "Consultando la web...",
+    pending: true
+  }));
+  setStatus("speaking", "consultando web");
+};
+
+const normalizeWebSearchFreshness = (freshness: unknown): WebSearchFreshness => {
+  switch (freshness) {
+    case "recent":
+    case "today":
+    case "general":
+      return freshness;
+    default:
+      return "auto";
+  }
+};
+
+const parseWebSearchToolArguments = (value?: string) => {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as {
+      query?: unknown;
+      freshness?: unknown;
+    };
+    const query = typeof parsed.query === "string" ? parsed.query.trim() : "";
+    if (!query) {
+      return null;
+    }
+
+    return {
+      query,
+      freshness: normalizeWebSearchFreshness(parsed.freshness)
+    };
+  } catch {
+    return null;
+  }
+};
+
+const executeWebSearch = async (query: string, freshness: WebSearchFreshness) => {
+  const response = await fetch("/api/tools/web-search", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      query,
+      freshness
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Web search request failed with status ${response.status}`);
+  }
+
+  return (await response.json()) as WebSearchResult;
+};
+
+const sendFunctionCallOutput = (callId: string, output: unknown) => {
+  sendRealtimeClientEvent({
+    type: "conversation.item.create",
+    item: {
+      type: "function_call_output",
+      call_id: callId,
+      output: JSON.stringify(output)
+    }
+  });
+};
+
+const handleWebSearchToolCall = async (outputItem: RealtimeOutputItem) => {
+  const callId = outputItem.call_id?.trim();
+  if (!callId || pendingToolCallIds.has(callId)) {
+    return;
+  }
+
+  const args = parseWebSearchToolArguments(outputItem.arguments);
+  pendingToolCallIds.add(callId);
+  startToolWaitFeedback(callId);
+  startWebSearchStatus(callId, args?.query ?? "Consulta web en preparación...");
+
+  try {
+    if (!args) {
+      throw new Error("Invalid web_search arguments.");
+    }
+
+    const result = await executeWebSearch(args.query, args.freshness);
+    sendFunctionCallOutput(callId, result);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "No se pudo completar la búsqueda web.";
+    sendFunctionCallOutput(callId, {
+      ok: false,
+      error: message
+    });
+  } finally {
+    sendRealtimeClientEvent({
+      type: "response.create",
+      response: {
+        instructions: WEB_SEARCH_RESPONSE_INSTRUCTIONS,
+        output_modalities: ["audio"]
+      }
+    });
+    pendingToolCallIds.delete(callId);
+  }
+};
+
 const sendMemoryBootstrapRefresh = async (bootstrapUserMessage?: string | null) => {
   if (!peerConnection || !dataChannel || dataChannel.readyState !== "open") {
     return;
@@ -609,22 +926,25 @@ const setUsage = (value: string) => {
 
 const syncButtons = () => {
   const connected = Boolean(peerConnection);
-  connectButton.disabled = connected || status === "connecting";
+  const accessGranted = isAppAccessGranted();
+  connectButton.disabled = !accessGranted || connected || status === "connecting";
   hangupButton.disabled = !connected;
 };
 
 const syncMemoryControls = () => {
+  const accessGranted = isAppAccessGranted();
   const memoryEnabled = appConfig?.memoryEnabled ?? false;
   const memoryResetAvailable = appConfig?.memoryResetAvailable ?? false;
   const adminAuthenticated = appConfig?.adminAuthenticated ?? false;
 
-  adminButton.hidden = !memoryEnabled || !memoryResetAvailable;
+  adminButton.hidden = !accessGranted || !memoryEnabled || !memoryResetAvailable;
   adminButton.textContent = adminAuthenticated ? "Salir admin" : "Admin";
 
   resetMemoryButton.hidden =
-    !memoryEnabled || !memoryResetAvailable || !adminAuthenticated;
-  resetMemoryButton.disabled = !memoryEnabled || !memoryResetAvailable || !adminAuthenticated;
-  memoryPanel.hidden = !memoryEnabled;
+    !accessGranted || !memoryEnabled || !memoryResetAvailable || !adminAuthenticated;
+  resetMemoryButton.disabled =
+    !accessGranted || !memoryEnabled || !memoryResetAvailable || !adminAuthenticated;
+  memoryPanel.hidden = !accessGranted || !memoryEnabled;
 };
 
 const memoryKindLabel = (kind: PersistedMemory["kind"]) => {
@@ -694,7 +1014,7 @@ const renderMemory = () => {
 };
 
 const refreshMemory = async () => {
-  if (!appConfig?.memoryEnabled) {
+  if (!isAppAccessGranted() || !appConfig?.memoryEnabled) {
     memoryEntries.length = 0;
     renderMemory();
     return;
@@ -706,6 +1026,10 @@ const refreshMemory = async () => {
     });
 
     if (!response.ok) {
+      if (response.status === 401) {
+        await loadAppConfig();
+        return;
+      }
       throw new Error(`Memory request failed with status ${response.status}`);
     }
 
@@ -735,7 +1059,7 @@ const syncMemoryPolling = () => {
     memoryRefreshTimer = null;
   }
 
-  if (!appConfig?.memoryEnabled) {
+  if (!isAppAccessGranted() || !appConfig?.memoryEnabled) {
     return;
   }
 
@@ -801,7 +1125,7 @@ const loadScript = async (src: string) =>
   });
 
 const ensureCaptchaUi = async () => {
-  if (!appConfig?.turnstileSiteKey) {
+  if (!isAppAccessGranted() || !appConfig?.turnstileSiteKey) {
     return;
   }
 
@@ -869,6 +1193,9 @@ const resetState = () => {
 };
 
 const closeConnection = () => {
+  clearToolWaitFeedback();
+  clearWebSearchStatus();
+  pendingToolCallIds.clear();
   dataChannel?.close();
   dataChannel = null;
 
@@ -900,11 +1227,81 @@ const loadAppConfig = async () => {
   }
 
   appConfig = (await response.json()) as AppConfig;
+  syncAppAccessUi();
+  syncButtons();
   syncMemoryControls();
   renderMemory();
-  void refreshMemory();
+  if (isAppAccessGranted()) {
+    void refreshMemory();
+  } else {
+    memoryEntries.length = 0;
+    renderMemory();
+  }
   syncMemoryPolling();
-  await ensureCaptchaUi();
+  if (isAppAccessGranted()) {
+    await ensureCaptchaUi();
+  }
+};
+
+const submitAppLogin = async () => {
+  const password = loginPasswordInput.value;
+  if (!password) {
+    setLoginMessage("Introduce la contraseña de acceso.", "error");
+    loginPasswordInput.focus();
+    return;
+  }
+
+  loginSubmitButton.disabled = true;
+  loginPasswordInput.disabled = true;
+  setLoginMessage("Validando acceso...");
+
+  try {
+    const response = await fetch("/api/auth/session", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        password
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, "No se pudo iniciar sesión."));
+    }
+
+    loginPasswordInput.value = "";
+    await loadAppConfig();
+    setStatus("idle");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "No se pudo iniciar sesión.";
+    setLoginMessage(message, "error");
+    loginPasswordInput.select();
+  } finally {
+    loginSubmitButton.disabled = false;
+    loginPasswordInput.disabled = false;
+  }
+};
+
+const logoutAppSession = async () => {
+  closeConnection();
+
+  try {
+    const response = await fetch("/api/auth/session", {
+      method: "DELETE",
+      credentials: "same-origin"
+    });
+
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response, "No se pudo cerrar la sesión."));
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "No se pudo cerrar la sesión.";
+    window.alert(message);
+  } finally {
+    await loadAppConfig();
+  }
 };
 
 const requestAdminToken = async () =>
@@ -944,7 +1341,7 @@ const requestAdminToken = async () =>
   });
 
 const sendMemoryIngest = async (itemId: string, transcript: string) => {
-  if (!appConfig?.memoryEnabled) {
+  if (!isAppAccessGranted() || !appConfig?.memoryEnabled) {
     return;
   }
 
@@ -1059,7 +1456,7 @@ const deletePersistentMemory = async (memory: PersistedMemory) => {
 };
 
 const toggleAdminSession = async () => {
-  if (!appConfig?.memoryResetAvailable) {
+  if (!isAppAccessGranted() || !appConfig?.memoryResetAvailable) {
     return;
   }
 
@@ -1137,12 +1534,13 @@ const handleRealtimeEvent = (event: RealtimeEvent) => {
       break;
     }
     case "response.created": {
+      clearToolWaitFeedback();
       setStatus("speaking", "respondiendo");
       break;
     }
     case "response.output_item.added": {
       const outputItem = event.response?.output?.[0];
-      if (!outputItem?.id) {
+      if (!outputItem?.id || outputItem.type === "function_call") {
         break;
       }
       assistantMessageOrder.set(outputItem.id, outputItem.id);
@@ -1198,6 +1596,17 @@ const handleRealtimeEvent = (event: RealtimeEvent) => {
           `${usage.total_tokens ?? 0} total · in ${usage.input_tokens ?? 0} · out ${usage.output_tokens ?? 0}`
         );
       }
+
+      const webSearchCall = event.response?.output?.find(
+        (outputItem) =>
+          outputItem.type === "function_call" && outputItem.name === "web_search"
+      );
+
+      if (webSearchCall) {
+        void handleWebSearchToolCall(webSearchCall);
+        break;
+      }
+
       setStatus("listening", "esperando siguiente turno");
       break;
     }
@@ -1223,6 +1632,10 @@ const connect = async () => {
       await loadAppConfig();
     }
 
+    if (!isAppAccessGranted()) {
+      throw new Error("Debes iniciar sesión antes de conectar.");
+    }
+
     if (appConfig?.turnstileSiteKey && !turnstileToken) {
       throw new Error("Completa la verificación humana antes de conectar.");
     }
@@ -1237,6 +1650,10 @@ const connect = async () => {
       })
     });
     if (!tokenResponse.ok) {
+      if (tokenResponse.status === 401) {
+        await loadAppConfig();
+        throw new Error(await readErrorMessage(tokenResponse, "Debes iniciar sesión otra vez."));
+      }
       throw new Error(`Token request failed with status ${tokenResponse.status}`);
     }
 
@@ -1344,12 +1761,21 @@ const connect = async () => {
   }
 };
 
+loginForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitAppLogin();
+});
+
 connectButton.addEventListener("click", () => {
   void connect();
 });
 
 hangupButton.addEventListener("click", () => {
   closeConnection();
+});
+
+logoutButton.addEventListener("click", () => {
+  void logoutAppSession();
 });
 
 adminButton.addEventListener("click", () => {
@@ -1361,6 +1787,7 @@ resetMemoryButton.addEventListener("click", () => {
 });
 
 renderTranscript();
+renderWebSearchStatus();
 renderMemory();
 syncButtons();
 syncMemoryControls();
@@ -1368,5 +1795,6 @@ setSession(currentSessionId);
 ambientScene.start();
 void loadAppConfig().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : "No se pudo cargar la configuración";
+  setLoginMessage(message, "error");
   setStatus("error", message);
 });

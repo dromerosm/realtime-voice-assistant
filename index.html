@@ -7,10 +7,43 @@
       content="width=device-width, initial-scale=1.0"
     />
     <title>Realtime Voice Assistant</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script type="module" src="/src/client/main.ts"></script>
   </head>
   <body>
-    <main class="app-shell">
+    <main id="loginGate" class="login-gate">
+      <section class="login-panel">
+        <p class="eyebrow">Private deployment</p>
+        <h1>Acceso protegido</h1>
+        <p class="hero-copy">
+          Antes de abrir el asistente, valida una sesión de acceso en el backend.
+          La contraseña nunca se guarda en el navegador.
+        </p>
+        <form id="loginForm" class="login-form">
+          <label class="visually-hidden" for="loginUsernameInput">Usuario</label>
+          <input
+            id="loginUsernameInput"
+            name="username"
+            type="text"
+            autocomplete="username"
+            class="visually-hidden"
+            tabindex="-1"
+          />
+          <label class="login-label" for="loginPasswordInput">Contraseña</label>
+          <input
+            id="loginPasswordInput"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            placeholder="Introduce la contraseña de despliegue"
+          />
+          <button id="loginSubmitButton" type="submit" class="primary">Entrar</button>
+        </form>
+        <p id="loginStatus" class="login-status">Comprobando sesión...</p>
+      </section>
+    </main>
+
+    <main id="appShell" class="app-shell" hidden>
       <section class="hero">
         <p class="eyebrow">OpenAI Realtime Voice POC</p>
         <h1>Asistente de voz en tiempo real</h1>
@@ -24,6 +57,7 @@
         <div class="controls">
           <button id="connectButton" class="primary">Connect</button>
           <button id="hangupButton" class="secondary" disabled>Hang up</button>
+          <button id="logoutButton" class="ghost" hidden>Cerrar sesión</button>
           <button id="adminButton" class="ghost" hidden>Admin</button>
           <button id="resetMemoryButton" class="ghost" hidden>Reset memory</button>
         </div>
@@ -56,6 +90,23 @@
           <div class="ambient-overlay">
             <span id="ambientModeBadge" class="ambient-badge">idle</span>
             <p class="ambient-caption">Anillos, barrido y pulsos sincronizados con la locución.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="webSearchPanel" class="panel web-search-panel" hidden>
+        <div class="panel-header">
+          <h2>Búsqueda web</h2>
+          <p>Indicador visible mientras el asistente consulta fuentes externas.</p>
+        </div>
+        <div class="web-search-stage">
+          <div class="web-search-meta">
+            <strong id="webSearchStatus">En espera</strong>
+            <span id="webSearchElapsed">0.0s</span>
+          </div>
+          <p id="webSearchQuery" class="web-search-query">Sin consulta activa.</p>
+          <div class="web-search-progress" aria-hidden="true">
+            <span class="web-search-progress-bar"></span>
           </div>
         </div>
       </section>

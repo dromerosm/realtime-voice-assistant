@@ -1,0 +1,43 @@
+{
+  "server": {
+    "port": 3000,
+    "host": "0.0.0.0"
+  },
+  "realtime": {
+    "model": "gpt-realtime-1.5",
+    "voice": "marin",
+    "transcriptionModel": "gpt-4o-mini-transcribe",
+    "instructions": "You are a concise real-time voice assistant. Keep answers short, natural, and conversational. Remember details shared by the user during the current session.",
+    "clientSecretTtlSeconds": 120,
+    "tokenRateLimitWindowMs": 60000,
+    "tokenRateLimitMaxRequests": 5,
+    "allowedOrigins": ["http://localhost:3001"]
+  },
+  "proxy": {
+    "trustHeaders": false,
+    "ipHeader": ""
+  },
+  "appLogin": {
+    "enabled": false,
+    "sessionTtlSeconds": 43200,
+    "rateLimitWindowMs": 900000,
+    "rateLimitMaxAttempts": 5
+  },
+  "memory": {
+    "enabled": true,
+    "dbPath": "./data/memory.sqlite",
+    "model": "gpt-5-mini",
+    "queueConcurrency": 1
+  },
+  "admin": {
+    "sessionTtlSeconds": 43200
+  },
+  "webSearch": {
+    "enabled": true,
+    "model": "gpt-5-nano",
+    "cacheTtlMs": 300000
+  },
+  "turnstile": {
+    "siteKey": ""
+  }
+}
