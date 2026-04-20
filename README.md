@@ -4,7 +4,7 @@ Lightweight proof of concept for a real-time voice assistant built on `gpt-realt
 
 ## Demo
 
-<video src="./media/realtime-voice-assistant-demo.mp4" controls muted playsinline></video>
+[![Realtime Voice Assistant demo](./media/realtime-voice-assistant-demo-poster.png)](./media/realtime-voice-assistant-demo.mp4)
 
 [Open the demo video directly](./media/realtime-voice-assistant-demo.mp4)
 
