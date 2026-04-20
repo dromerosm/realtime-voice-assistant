@@ -2,6 +2,12 @@
 
 Lightweight proof of concept for a real-time voice assistant built on `gpt-realtime-1.5`.
 
+## Demo
+
+<video src="./media/realtime-voice-assistant-demo.mp4" controls muted playsinline></video>
+
+[Open the demo video directly](./media/realtime-voice-assistant-demo.mp4)
+
 ## Stack
 
 - `Node 24`
