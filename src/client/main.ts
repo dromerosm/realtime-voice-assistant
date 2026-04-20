@@ -268,6 +268,10 @@ class AmbientVoiceScene {
     this.rafId = window.requestAnimationFrame(this.frame);
   }
 
+  refreshLayout() {
+    this.resize();
+  }
+
   setMode(mode: AppStatus) {
     this.mode = mode;
     this.energyTarget =
@@ -545,8 +549,11 @@ const toolWaitEntryIds = new Map<string, string>();
 const activeWebSearches = new Map<string, ActiveWebSearch>();
 let webSearchTicker: number | null = null;
 const ambientScene = new AmbientVoiceScene(ambientCanvas, ambientModeBadge);
+const WEB_SEARCH_CUE_TEXT = "Un segundo, que lo consulto.";
+const WEB_SEARCH_CUE_LEAD_IN_MS = 300;
+const WEB_SEARCH_CUE_MIN_DURATION_MS = 1200;
 const WEB_SEARCH_RESPONSE_INSTRUCTIONS =
-  'Responde en espanol. Empieza exactamente con "Un momento, lo compruebo en la web." y, a continuacion, da la respuesta final usando el resultado de la tool web_search. No digas que vas a comprobarlo mas tarde ni menciones detalles internos de tools.';
+  "Responde en espanol usando el resultado de la tool web_search. Ve directo a la respuesta final y no menciones detalles internos de tools.";
 
 const isAppAccessGranted = () => !appConfig?.authEnabled || Boolean(appConfig?.appAuthenticated);
 
@@ -569,6 +576,12 @@ const syncAppAccessUi = () => {
     }, 0);
   } else {
     setLoginMessage("Sesión validada.");
+    window.requestAnimationFrame(() => {
+      ambientScene.refreshLayout();
+      window.requestAnimationFrame(() => {
+        ambientScene.refreshLayout();
+      });
+    });
   }
 };
 
@@ -579,6 +592,30 @@ const readErrorMessage = async (response: Response, fallback: string) => {
   } catch {
     return fallback;
   }
+};
+
+const playWebSearchCue = () => {
+  sendRealtimeClientEvent({
+    type: "response.create",
+    response: {
+      conversation: "none",
+      instructions: `Responde exactamente con esta frase y nada mas: "${WEB_SEARCH_CUE_TEXT}"`,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "Di una frase breve antes de consultar la web."
+            }
+          ]
+        }
+      ],
+      max_output_tokens: 48,
+      output_modalities: ["audio"]
+    }
+  });
 };
 
 const stopRemoteAudioMeter = () => {
@@ -767,7 +804,7 @@ const startToolWaitFeedback = (callId: string) => {
   upsertTranscriptEntry(entryId, "assistant", () => ({
     id: entryId,
     role: "assistant",
-    text: "Consultando la web...",
+    text: WEB_SEARCH_CUE_TEXT,
     pending: true
   }));
   setStatus("speaking", "consultando web");
@@ -839,7 +876,10 @@ const sendFunctionCallOutput = (callId: string, output: unknown) => {
   });
 };
 
-const handleWebSearchToolCall = async (outputItem: RealtimeOutputItem) => {
+const handleWebSearchToolCall = async (
+  outputItem: RealtimeOutputItem,
+  options?: { skipCue?: boolean }
+) => {
   const callId = outputItem.call_id?.trim();
   if (!callId || pendingToolCallIds.has(callId)) {
     return;
@@ -848,16 +888,30 @@ const handleWebSearchToolCall = async (outputItem: RealtimeOutputItem) => {
   const args = parseWebSearchToolArguments(outputItem.arguments);
   pendingToolCallIds.add(callId);
   startToolWaitFeedback(callId);
+  if (!options?.skipCue) {
+    playWebSearchCue();
+  }
   startWebSearchStatus(callId, args?.query ?? "Consulta web en preparación...");
+  const minCueDuration = new Promise((resolve) => {
+    window.setTimeout(resolve, options?.skipCue ? 0 : WEB_SEARCH_CUE_MIN_DURATION_MS);
+  });
 
   try {
+    if (!options?.skipCue) {
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, WEB_SEARCH_CUE_LEAD_IN_MS);
+      });
+    }
+
     if (!args) {
       throw new Error("Invalid web_search arguments.");
     }
 
     const result = await executeWebSearch(args.query, args.freshness);
+    await minCueDuration;
     sendFunctionCallOutput(callId, result);
   } catch (error) {
+    await minCueDuration;
     const message =
       error instanceof Error ? error.message : "No se pudo completar la búsqueda web.";
     sendFunctionCallOutput(callId, {
@@ -1603,7 +1657,15 @@ const handleRealtimeEvent = (event: RealtimeEvent) => {
       );
 
       if (webSearchCall) {
-        void handleWebSearchToolCall(webSearchCall);
+        const hasAssistantOutput = Boolean(
+          event.response?.output?.some(
+            (outputItem) =>
+              outputItem.type !== "function_call" &&
+              outputItem.type !== "function_call_output" &&
+              ((outputItem.content?.length ?? 0) > 0 || outputItem.type === "message")
+          )
+        );
+        void handleWebSearchToolCall(webSearchCall, { skipCue: hasAssistantOutput });
         break;
       }
 

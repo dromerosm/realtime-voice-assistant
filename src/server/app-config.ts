@@ -60,7 +60,7 @@ const defaultConfig: AppRuntimeConfig = {
     clientSecretTtlSeconds: 120,
     tokenRateLimitWindowMs: 60_000,
     tokenRateLimitMaxRequests: 5,
-    allowedOrigins: ["http://localhost:3001"]
+    allowedOrigins: ["http://localhost:3001", "http://127.0.0.1:3001"]
   },
   proxy: {
     trustHeaders: false,

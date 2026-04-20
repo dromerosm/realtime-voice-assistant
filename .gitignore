@@ -3,3 +3,9 @@ node_modules
 .env
 data
 tmp
+TODO.md
+PLAN.md
+.DS_Store
+test-results/
+src/client/main 2.ts
+src/server/server 2.ts

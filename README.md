@@ -1,38 +1,38 @@
 # Realtime Voice Assistant
 
-POC ligero para un asistente de voz en tiempo real con `gpt-realtime-1.5`.
+Lightweight proof of concept for a real-time voice assistant built on `gpt-realtime-1.5`.
 
 ## Stack
 
 - `Node 24`
 - `TypeScript`
 - `Vite`
-- `WebRTC` directo navegador -> OpenAI Realtime API
-- `SQLite` local con `node:sqlite` para memoria persistente ligera
-- `Docker` para local y producción
+- Browser-to-OpenAI `WebRTC`
+- Local `SQLite` via `node:sqlite` for lightweight persistent memory
+- `Docker` for local and production runtime
 
-## Qué hace
+## What It Does
 
-- Sirve una webapp estática con transcript visible.
-- Puede exigir una pantalla de login previa con cookie de sesión `HttpOnly`.
-- Expone `POST /api/realtime/token` para emitir `client_secrets` efímeros.
-- Extrae memoria persistente ligera en segundo plano con `gpt-5-mini`.
-- Lanza búsquedas web solo cuando el modelo Realtime lo pide, usando un sidecar de `Responses API` con `gpt-5-nano`.
-- Carga esa memoria en nuevas sesiones como contexto inicial mediante un mensaje oculto de usuario, no como instrucciones del sistema.
-- Expone `POST /api/memory/ingest` y `POST /api/memory/reset`.
-- No usa relay propio para audio ni infraestructura externa adicional.
-- Añade rate limiting, TTL corto del token efímero y soporte opcional para Cloudflare Turnstile.
+- Serves a static web app with a visible transcript.
+- Can require an app-level login screen backed by an `HttpOnly` session cookie.
+- Exposes `POST /api/realtime/token` to mint short-lived realtime `client_secret` credentials.
+- Extracts lightweight persistent memory in the background with `gpt-5-mini`.
+- Runs web searches only when the Realtime model asks for them, using a `Responses API` sidecar with `gpt-5-nano`.
+- Loads persistent memory into new sessions as hidden user context rather than system instructions.
+- Exposes `POST /api/memory/ingest` and `POST /api/memory/reset`.
+- Does not relay audio through your own backend.
+- Includes rate limiting, short-lived ephemeral tokens, and optional Cloudflare Turnstile support.
 
-## Configuración
+## Configuration
 
-La configuración queda separada en dos sitios:
+Runtime configuration is split across two places:
 
-- secretos y credenciales en `.env`
-- parámetros operativos no sensibles en [app.config.json](./app.config.json)
+- secrets and credentials in `.env`
+- non-sensitive runtime settings in [app.config.json](./app.config.json)
 
 ### `.env`
 
-Deja aquí solo secretos:
+Keep only secrets here:
 
 - `OPENAI_API_KEY`
 - `APP_LOGIN_PASSWORD_HASH`
@@ -41,91 +41,98 @@ Deja aquí solo secretos:
 - `ADMIN_SESSION_SECRET`
 - `TURNSTILE_SECRET_KEY`
 
-Opcionalmente puedes seguir guardando aquí credenciales de infraestructura o tooling, por ejemplo:
-
-- `CLOUDFLARE_ACCOUNT_ID`
-- `CLOUDFLARE_API_TOKEN`
-- `GITHUB_TOKEN`
-
-El ejemplo mínimo está en [.env.example](./.env.example).
+The minimal example is in [.env.example](./.env.example).
+If you use infrastructure or tooling credentials, keep them outside this repo or in a dedicated secrets manager.
 
 ### `app.config.json`
 
-Deja aquí todo lo no sensible:
+Keep all non-sensitive settings here:
 
-- puerto y host internos
-- modelo, voz e instrucciones de Realtime
-- rate limits y TTLs
-- orígenes permitidos
-- confianza en proxy
-- flags de login, memoria y web search
-- ruta SQLite
+- internal port and host
+- Realtime model, voice, and instructions
+- rate limits and TTLs
+- allowed origins
+- proxy trust settings
+- login, memory, and web search feature flags
+- SQLite path
 - `TURNSTILE_SITE_KEY`
 
-## Probar en local
+## Run Locally
+
+```bash
+cp .env.example .env
+```
+
+Set at least:
+
+```bash
+OPENAI_API_KEY=...
+```
+
+Then run:
 
 ```bash
 docker compose up --build
 ```
 
-Abre `http://localhost:3001`.
-Si quieres otro puerto externo, define `APP_PORT`.
-Si cambias `APP_PORT`, ajusta también `realtime.allowedOrigins` en [app.config.json](./app.config.json).
+Open `http://localhost:3001`.
+If you want a different external port, set `APP_PORT`.
+If you change `APP_PORT`, update `realtime.allowedOrigins` in [app.config.json](./app.config.json) as well.
 
-La memoria persistente se guarda en un volumen Docker llamado `memory-data`.
-Si defines `MEMORY_ADMIN_TOKEN`, aparecerá un botón `Admin` en la UI para abrir o cerrar una sesión admin y habilitar `Reset memory`.
-Si activas `webSearch.enabled`, el asistente podrá verificar información reciente con una tool propia y una búsqueda sidecar rápida con caché local.
+Persistent memory is stored in a Docker volume named `memory-data`.
+If you define `MEMORY_ADMIN_TOKEN`, the UI shows an `Admin` button that can open or close an admin session and enable `Reset memory`.
+If you enable `webSearch.enabled`, the assistant can verify recent information using its own tool and a fast cached sidecar search.
 
-## Proxy y cabeceras
+## Proxy And Headers
 
-Por defecto la app no confía en `X-Forwarded-For` ni en `X-Forwarded-Proto`. Esto evita que el rate limiting y el flag `Secure` de la cookie dependan de cabeceras falsificables si alguien llega directo al origen.
+By default, the app does not trust `X-Forwarded-For` or `X-Forwarded-Proto`. This avoids making rate limiting and the cookie `Secure` flag depend on spoofable headers when traffic can hit the origin directly.
 
-Solo actívalo si el contenedor está expuesto exclusivamente detrás de un proxy de confianza:
+Enable trusted proxy headers only if the container is exposed exclusively behind a trusted proxy:
 
 - `proxy.trustHeaders=true`
-- `proxy.ipHeader="cf-connecting-ip"` si entras por Cloudflare
-- `proxy.ipHeader="x-forwarded-for"` solo si Traefik o tu proxy sanea esa cabecera y el origen no está expuesto públicamente
+- `proxy.ipHeader="cf-connecting-ip"` if traffic comes through Cloudflare
+- `proxy.ipHeader="x-forwarded-for"` only if Traefik or your proxy sanitizes that header and the origin is not publicly exposed
 
-Si publicas la IP del servidor directamente además del proxy, vuelve a `proxy.trustHeaders=false`.
+If you expose the server IP directly in addition to the proxy, switch back to `proxy.trustHeaders=false`.
 
-## Login de acceso a la app
+## App Login
 
-Si vas a publicarla en Hetzner/Cloudflare, activa el acceso previo de aplicación:
+If you plan to publish this behind Hetzner and Cloudflare, enable the app-level access gate:
 
-- `appLogin.enabled=true` en [app.config.json](./app.config.json)
-- `APP_LOGIN_PASSWORD_HASH` con formato `scrypt$<saltBase64>$<derivedKeyBase64>`
-- `APP_SESSION_SECRET` con un secreto distinto para firmar la cookie de sesión
+- `appLogin.enabled=true` in [app.config.json](./app.config.json)
+- `APP_LOGIN_PASSWORD_HASH` using the format `scrypt$<saltBase64>$<derivedKeyBase64>`
+- `APP_SESSION_SECRET` set to a separate secret used to sign the session cookie
 
-Ejemplo rápido para generar el hash:
+Quick example for generating the password hash:
 
 ```bash
-node -e 'const { randomBytes, scryptSync } = require("node:crypto"); const password = process.argv[1]; const salt = randomBytes(16); const hash = scryptSync(password, salt, 64); console.log(`scrypt$${salt.toString("base64")}$${hash.toString("base64")}`);' "cambia-esta-password"
+node -e 'const { randomBytes, scryptSync } = require("node:crypto"); const password = process.argv[1]; const salt = randomBytes(16); const hash = scryptSync(password, salt, 64); console.log(`scrypt$${salt.toString("base64")}$${hash.toString("base64")}`);' "change-this-password"
 ```
 
-El login de la app:
+The app login:
 
-- bloquea la UI hasta que exista sesión válida
-- protege `POST /api/realtime/token`, memoria, tools y sesión admin
-- usa cookie `HttpOnly`, `SameSite=Strict` y añade `Secure` automáticamente cuando llega por HTTPS o `x-forwarded-proto=https`
-- aplica rate limiting independiente a los intentos de acceso
+- blocks the UI until a valid session exists
+- protects `POST /api/realtime/token`, memory endpoints, tools, and the admin session
+- uses an `HttpOnly`, `SameSite=Strict` cookie and adds `Secure` automatically when the request arrives over HTTPS or `x-forwarded-proto=https`
+- applies its own rate limiting for login attempts
 
-## Hardening incluido
+## Included Hardening
 
-- La API key de OpenAI nunca sale del servidor.
-- El acceso general a la app puede quedar detrás de una contraseña con hash `scrypt`.
-- Los `client_secrets` efímeros tienen TTL corto.
-- El endpoint de token aplica rate limiting por IP.
-- Los errores upstream no se devuelven completos al cliente.
-- Se validan orígenes permitidos según `realtime.allowedOrigins`.
-- La app envía `Content-Security-Policy` para reducir impacto de XSS y carga de terceros no esperados.
-- Si configuras Cloudflare Turnstile, la emisión del token requiere verificación humana.
-- El borrado de memoria persistente exige `MEMORY_ADMIN_TOKEN`.
-- La UI usa una cookie `HttpOnly` de sesión admin para habilitar el borrado desde el navegador.
-- El extractor de memoria usa política conservadora y descarta datos sensibles o de baja confianza.
-- La memoria persistente se inyecta en Realtime como `conversation.item.create` con rol `user`, evitando mezclar contenido derivado del usuario con `instructions`.
-- La búsqueda web no entra en el camino crítico de voz: Realtime solo decide cuándo usarla y el backend la resuelve aparte con `gpt-5-nano` y caché.
+- The OpenAI API key never leaves the server.
+- General app access can be protected by an `scrypt` password hash.
+- Ephemeral `client_secret` credentials have a short TTL.
+- The token endpoint is rate-limited by client IP.
+- Upstream errors are not returned in full to the browser.
+- Allowed origins are enforced through `realtime.allowedOrigins`.
+- The app sends a `Content-Security-Policy` header to reduce the impact of XSS and unexpected third-party loads.
+- If Cloudflare Turnstile is configured, token issuance requires human verification.
+- Persistent memory reset requires `MEMORY_ADMIN_TOKEN`.
+- The UI uses a separate admin `HttpOnly` session cookie to enable destructive admin actions in the browser.
+- The memory extractor uses a conservative policy and drops sensitive or low-confidence data.
+- Persistent memory is injected into Realtime as a `conversation.item.create` with role `user`, avoiding the mix of user-derived content into `instructions`.
+- Web search stays out of the voice critical path: Realtime only decides when to use it, and the backend resolves it separately with `gpt-5-nano` plus caching.
 
-## Build local sin Docker
+## Local Build Without Docker
 
 ```bash
 npm install
@@ -133,22 +140,20 @@ npm run build
 npm start
 ```
 
-## Despliegue en Hetzner
+## Deploying On Hetzner
 
-La app está preparada para empaquetarse como una única imagen. Para desplegarla detrás de Traefik con la skill disponible:
+The app is designed to ship as a single Docker image. To publish it behind Traefik and Cloudflare:
 
-Antes de publicar, revisa también [PRE-DEPLOY.md](./PRE-DEPLOY.md).
+Before going live, review [PRE-DEPLOY.md](./PRE-DEPLOY.md).
 
-1. Construye y publica una imagen accesible desde Hetzner.
-2. Usa la skill `cloudflare-hetzner-subdomain` desde la raíz del repo con:
+1. Build and publish an image reachable from Hetzner.
+2. Deploy the container on a host behind Traefik, pointing traffic to internal port `3000`.
+3. Restrict `realtime.allowedOrigins` to the final public domain.
+4. If you trust proxy headers, set `proxy.trustHeaders=true` and the correct `proxy.ipHeader`.
+5. If you enable app login or Turnstile, define the required secrets in `.env` before deployment.
 
-```bash
-bash \
-  .agents/skills/cloudflare-hetzner-subdomain/scripts/provision_subdomain.sh \
-  --subdomain realtime-assistant \
-  --image <tu-imagen-publicada> \
-  --internal-port 3000 \
-  --service-name realtime-assistant
-```
+This repo does not include provider-specific deployment automation.
 
-La skill se encarga del DNS y de los labels de Traefik en el host remoto.
+## License
+
+This project is published under [Apache License 2.0](./LICENSE).

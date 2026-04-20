@@ -1,25 +1,25 @@
 # Pre-Deploy
 
-Checklist y notas de seguridad antes de desplegar esta app en Hetzner/Cloudflare.
+Checklist and security notes before deploying this app on Hetzner and Cloudflare.
 
-## Estado actual
+## Current State
 
-La app ya incluye:
+The app already includes:
 
-- login previo de aplicación con cookie de sesión `HttpOnly`
-- sesión admin separada para acciones sensibles
-- rate limiting en login y en emisión de tokens efímeros
-- validación de `Origin` para endpoints sensibles
-- soporte opcional para Cloudflare Turnstile
+- app-level login with an `HttpOnly` session cookie
+- a separate admin session for sensitive actions
+- rate limiting for login attempts and ephemeral token issuance
+- `Origin` validation on sensitive endpoints
+- optional Cloudflare Turnstile support
 - `Content-Security-Policy`
-- cookies con `SameSite=Strict`
-- flag `Secure` automático cuando la request llega como HTTPS a través de proxy confiable
+- cookies with `SameSite=Strict`
+- automatic `Secure` cookies when the request arrives as HTTPS through a trusted proxy
 
-## Dónde va cada cosa
+## Where Each Setting Belongs
 
 ### `.env`
 
-Solo secretos:
+Secrets only:
 
 - `OPENAI_API_KEY`
 - `APP_LOGIN_PASSWORD_HASH`
@@ -28,15 +28,17 @@ Solo secretos:
 - `ADMIN_SESSION_SECRET`
 - `TURNSTILE_SECRET_KEY`
 
-Opcionalmente también credenciales de infra o tooling:
+Optional infrastructure or tooling credentials:
 
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`
 - `GITHUB_TOKEN`
 
+If the repo is public, keep those infrastructure credentials outside the project instead of in a local `.env` inside the tree.
+
 ### `app.config.json`
 
-Todo lo no sensible:
+All non-sensitive settings:
 
 - `server`
 - `realtime`
@@ -47,152 +49,152 @@ Todo lo no sensible:
 - `webSearch`
 - `turnstile.siteKey`
 
-## Hallazgos del mini pentest
+## Findings From The Mini Pentest
 
-### Corregido
+### Fixed
 
-1. Se podía esquivar el rate limiting falsificando `X-Forwarded-For`.
+1. Rate limiting could be bypassed by spoofing `X-Forwarded-For`.
 
-- Antes, el backend aceptaba `X-Forwarded-For` por defecto como IP cliente.
-- Impacto: un atacante podía rotar esa cabecera y evitar el bloqueo de intentos.
-- Estado actual: corregido.
-- Ahora solo se aceptan cabeceras de proxy si activas explícitamente:
+- Previously, the backend accepted `X-Forwarded-For` as the client IP by default.
+- Impact: an attacker could rotate that header and bypass request throttling.
+- Current state: fixed.
+- Proxy headers are now accepted only if you explicitly enable:
   - `proxy.trustHeaders=true`
-  - `proxy.ipHeader="<cabecera>"`
+  - `proxy.ipHeader="<header>"`
 
-2. Faltaba `Content-Security-Policy`.
+2. `Content-Security-Policy` was missing.
 
-- Impacto: cualquier XSS futura tendría más alcance.
-- Estado actual: corregido.
-- La app ya envía CSP restrictiva para scripts, conexiones y frames.
+- Impact: any future XSS would have had a wider blast radius.
+- Current state: fixed.
+- The app now sends a restrictive CSP for scripts, connections, and frames.
 
-### Verificado
+### Verified
 
-- Sin sesión, `/api/realtime/token` devuelve `401`.
-- Sin sesión, `/api/memory` devuelve `401`.
-- `POST /api/auth/session` devuelve `401` con contraseña inválida.
-- `POST /api/auth/session` devuelve `403` si el `Origin` no está permitido.
-- `POST /api/memory/reset` devuelve `403` con `Origin` ajeno.
-- El reset de memoria exige sesión de app y sesión admin válidas.
-- La cookie de app sale con `HttpOnly; SameSite=Strict`.
-- La cookie añade `Secure` cuando la request entra como HTTPS vía proxy confiable.
+- Without a session, `/api/realtime/token` returns `401`.
+- Without a session, `/api/memory` returns `401`.
+- `POST /api/auth/session` returns `401` with an invalid password.
+- `POST /api/auth/session` returns `403` if the `Origin` is not allowed.
+- `POST /api/memory/reset` returns `403` with a foreign `Origin`.
+- Memory reset requires both a valid app session and a valid admin session.
+- The app cookie is sent with `HttpOnly; SameSite=Strict`.
+- The cookie adds `Secure` when the request arrives as HTTPS through a trusted proxy.
 
-## Variables obligatorias para producción
+## Required Production Variables
 
-Configura al menos:
+Configure at least:
 
 - `OPENAI_API_KEY`
-- `realtime.allowedOrigins=["https://<tu-dominio>"]` en `app.config.json`
-- `appLogin.enabled=true` en `app.config.json`
+- `realtime.allowedOrigins=["https://<your-domain>"]` in `app.config.json`
+- `appLogin.enabled=true` in `app.config.json`
 - `APP_LOGIN_PASSWORD_HASH=scrypt$<saltBase64>$<derivedKeyBase64>`
-- `APP_SESSION_SECRET=<secreto-largo-y-distinto-del-hash>`
-- `MEMORY_ADMIN_TOKEN=<token-admin-largo>`
-- `ADMIN_SESSION_SECRET=<secreto-largo-y-distinto>`
+- `APP_SESSION_SECRET=<long-secret-distinct-from-the-password-hash>`
+- `MEMORY_ADMIN_TOKEN=<long-admin-token>`
+- `ADMIN_SESSION_SECRET=<separate-long-secret>`
 
-Si usas Cloudflare/Traefik:
+If you use Cloudflare and Traefik:
 
 - `proxy.trustHeaders=true`
 - `proxy.ipHeader="cf-connecting-ip"`
 
-Si expones la IP del origen directamente o no estás seguro de sanear cabeceras:
+If you expose the origin IP directly or are not sure that headers are sanitized:
 
 - `proxy.trustHeaders=false`
 
-Opcionales recomendables:
+Recommended optional settings:
 
 - `turnstile.siteKey`
 - `TURNSTILE_SECRET_KEY`
-- `realtime.clientSecretTtlSeconds=120` o menos si quieres ser más agresivo
+- `realtime.clientSecretTtlSeconds=120` or less if you want a more aggressive TTL
 - `realtime.tokenRateLimitWindowMs`
 - `realtime.tokenRateLimitMaxRequests`
 - `appLogin.rateLimitWindowMs`
 - `appLogin.rateLimitMaxAttempts`
 
-## Generar el hash de contraseña
+## Generate The Password Hash
 
-Ejemplo:
+Example:
 
 ```bash
-node -e 'const { randomBytes, scryptSync } = require("node:crypto"); const password = process.argv[1]; const salt = randomBytes(16); const hash = scryptSync(password, salt, 64); console.log(`scrypt$${salt.toString("base64")}$${hash.toString("base64")}`);' "cambia-esta-password"
+node -e 'const { randomBytes, scryptSync } = require("node:crypto"); const password = process.argv[1]; const salt = randomBytes(16); const hash = scryptSync(password, salt, 64); console.log(`scrypt$${salt.toString("base64")}$${hash.toString("base64")}`);' "change-this-password"
 ```
 
-## Configuración recomendada detrás de Cloudflare
+## Recommended Setup Behind Cloudflare
 
-- Publica solo el dominio detrás de Cloudflare.
-- No expongas el origen de Hetzner directamente a Internet si puedes evitarlo.
-- Usa `proxy.trustHeaders=true`.
-- Usa `proxy.ipHeader="cf-connecting-ip"`.
-- Mantén `realtime.allowedOrigins` limitado a tu dominio final.
-- Si activas Turnstile, verifica que el sitio y el secreto corresponden al dominio final.
+- Publish only the final domain behind Cloudflare.
+- Do not expose the Hetzner origin directly to the Internet if you can avoid it.
+- Use `proxy.trustHeaders=true`.
+- Use `proxy.ipHeader="cf-connecting-ip"`.
+- Keep `realtime.allowedOrigins` restricted to the final domain.
+- If you enable Turnstile, make sure the site key and secret match the final domain.
 
-## Configuración recomendada detrás de Traefik
+## Recommended Setup Behind Traefik
 
-- Asegúrate de que Traefik reenvía HTTPS al backend con `X-Forwarded-Proto=https`.
-- Si Cloudflare está delante de Traefik, prioriza `cf-connecting-ip` como IP cliente.
-- No aceptes `x-forwarded-for` salvo que controles totalmente el acceso al origen y sanees la cabecera.
+- Make sure Traefik forwards HTTPS to the backend with `X-Forwarded-Proto=https`.
+- If Cloudflare sits in front of Traefik, prefer `cf-connecting-ip` as the client IP header.
+- Do not accept `x-forwarded-for` unless you fully control origin access and sanitize that header.
 
-## Checklist antes de desplegar
+## Checklist Before Deployment
 
 - `npm run typecheck`
 - `npm run build`
-- Probar login correcto y login incorrecto
-- Confirmar `401` en `/api/realtime/token` sin sesión
-- Confirmar `403` con `Origin` no permitido en `/api/auth/session`
-- Confirmar presencia de `Content-Security-Policy` en la respuesta HTML
-- Confirmar que la cookie de sesión sale con `Secure` en el dominio HTTPS final
-- Confirmar que `appLogin.enabled=true` en producción
-- Confirmar que `APP_SESSION_SECRET` y `ADMIN_SESSION_SECRET` no reutilizan otros secretos
-- Confirmar que el origen de Hetzner no queda expuesto directamente si activas confianza en proxy
+- Test successful and failed login flows
+- Confirm `401` from `/api/realtime/token` without a session
+- Confirm `403` from `/api/auth/session` with a disallowed `Origin`
+- Confirm `Content-Security-Policy` is present on the HTML response
+- Confirm the session cookie is marked `Secure` on the final HTTPS domain
+- Confirm `appLogin.enabled=true` in production
+- Confirm `APP_SESSION_SECRET` and `ADMIN_SESSION_SECRET` do not reuse other secrets
+- Confirm the Hetzner origin is not directly exposed if proxy trust is enabled
 
-## Pruebas rápidas útiles
+## Useful Quick Checks
 
-Sin sesión:
+Without a session:
 
 ```bash
-curl -i -X POST https://<tu-dominio>/api/realtime/token \
+curl -i -X POST https://<your-domain>/api/realtime/token \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
 
-Debe devolver `401`.
+It should return `401`.
 
-Login con `Origin` incorrecto:
+Login with an invalid `Origin`:
 
 ```bash
-curl -i -X POST https://<tu-dominio>/api/auth/session \
+curl -i -X POST https://<your-domain>/api/auth/session \
   -H 'Origin: https://evil.example' \
   -H 'Content-Type: application/json' \
   -d '{"password":"test"}'
 ```
 
-Debe devolver `403`.
+It should return `403`.
 
-Ver cabeceras del HTML:
+Inspect HTML headers:
 
 ```bash
-curl -I https://<tu-dominio>/
+curl -I https://<your-domain>/
 ```
 
-Debe incluir al menos:
+It should include at least:
 
 - `Content-Security-Policy`
 - `X-Frame-Options: DENY`
 - `X-Content-Type-Options: nosniff`
 - `Referrer-Policy: strict-origin-when-cross-origin`
 
-## Riesgos residuales
+## Residual Risks
 
-- Si activas confianza en proxy y el origen sigue expuesto públicamente, vuelves a abrir la puerta a cabeceras falsificadas.
-- La CSP actual es razonable para esta app, pero cualquier cambio en recursos externos debe revisarse antes de desplegar.
-- Turnstile mejora el abuso automatizado, pero no sustituye el login ni el rate limiting.
-- Si la API key de OpenAI o los secretos de sesión se filtran en el host, el endurecimiento HTTP deja de ser suficiente.
+- If you enable proxy trust while the origin stays publicly exposed, spoofed headers become a risk again.
+- The current CSP is reasonable for this app, but any change that adds external resources should be reviewed before deployment.
+- Turnstile helps with automated abuse, but it does not replace login or rate limiting.
+- If the OpenAI API key or the session secrets leak on the host, HTTP-layer hardening is no longer enough.
 
-## Decisión de despliegue
+## Deployment Decision
 
-No desplegar hasta cumplir:
+Do not deploy until all of the following are true:
 
-- login de app activado
-- secretos de sesión definidos
-- orígenes permitidos ajustados en `app.config.json` al dominio final
-- estrategia de proxy clara
-- verificación manual de cookies `Secure` en HTTPS
+- app login is enabled
+- session secrets are defined
+- allowed origins in `app.config.json` match the final domain
+- proxy strategy is clear
+- `Secure` cookies have been manually verified under HTTPS

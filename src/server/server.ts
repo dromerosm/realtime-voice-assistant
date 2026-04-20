@@ -879,6 +879,7 @@ const buildRealtimeInstructions = () =>
       ? [
           "When the user asks for recent, changing, or externally verifiable information, use the web_search tool.",
           "The client may play a very short waiting cue while web_search runs.",
+          "If you decide to use web_search, do not speak or write a preamble before the tool call. Call the tool directly.",
           "After the tool result arrives, answer clearly and concisely in Spanish.",
           "Do not use web_search for stable chit-chat or facts already available in the conversation."
         ].join(" ")
