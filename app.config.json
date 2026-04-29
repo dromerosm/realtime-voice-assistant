@@ -3,6 +3,18 @@
     "port": 3000,
     "host": "0.0.0.0"
   },
+  "voiceProviders": {
+    "default": "openai",
+    "openai": {
+      "enabled": true
+    },
+    "elevenlabs": {
+      "enabled": true,
+      "agentId": "",
+      "participantName": "",
+      "environment": "production"
+    }
+  },
   "realtime": {
     "model": "gpt-realtime-1.5",
     "voice": "marin",
@@ -12,6 +24,8 @@
     "tokenRateLimitWindowMs": 60000,
     "tokenRateLimitMaxRequests": 5,
     "allowedOrigins": [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
       "http://localhost:3001",
       "http://127.0.0.1:3001"
     ]

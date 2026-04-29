@@ -13,7 +13,7 @@ Lightweight proof of concept for a real-time voice assistant built on `gpt-realt
 - `Node 24`
 - `TypeScript`
 - `Vite`
-- Browser-to-OpenAI `WebRTC`
+- Browser-to-provider `WebRTC` with OpenAI Realtime and optional ElevenLabs Agents
 - Local `SQLite` via `node:sqlite` for lightweight persistent memory
 - `Docker` for local and production runtime
 
@@ -22,6 +22,7 @@ Lightweight proof of concept for a real-time voice assistant built on `gpt-realt
 - Serves a static web app with a visible transcript.
 - Can require an app-level login screen backed by an `HttpOnly` session cookie.
 - Exposes `POST /api/realtime/token` to mint short-lived realtime `client_secret` credentials.
+- Exposes `POST /api/elevenlabs/conversation-token` to mint ElevenLabs WebRTC conversation tokens.
 - Extracts lightweight persistent memory in the background with `gpt-5-mini`.
 - Runs web searches only when the Realtime model asks for them, using a `Responses API` sidecar with `gpt-5-nano`.
 - Loads persistent memory into new sessions as hidden user context rather than system instructions.
@@ -41,6 +42,9 @@ Runtime configuration is split across two places:
 Keep only secrets here:
 
 - `OPENAI_API_KEY`
+- `ELEVENLABS_API_KEY` or `ELEVEN_LABS_API_KEY`
+- `ELEVENLABS_AGENT_ID`
+- `ELEVENLABS_PARTICIPANT_NAME`
 - `APP_LOGIN_PASSWORD_HASH`
 - `APP_SESSION_SECRET`
 - `MEMORY_ADMIN_TOKEN`
@@ -55,6 +59,7 @@ If you use infrastructure or tooling credentials, keep them outside this repo or
 Keep all non-sensitive settings here:
 
 - internal port and host
+- enabled voice providers and default provider
 - Realtime model, voice, and instructions
 - rate limits and TTLs
 - allowed origins
@@ -74,6 +79,15 @@ Set at least:
 ```bash
 OPENAI_API_KEY=...
 ```
+
+To enable the ElevenLabs option in the UI, also set:
+
+```bash
+ELEVENLABS_API_KEY=...
+ELEVENLABS_AGENT_ID=...
+```
+
+The ElevenLabs API key needs Conversational AI permissions to mint conversation tokens. The ElevenLabs agent must have a client tool named `web_search` with `query` and `freshness` parameters if you want parity with the OpenAI web-search flow. The app registers the browser-side handler and reuses `/api/tools/web-search`.
 
 Then run:
 
@@ -124,7 +138,7 @@ The app login:
 
 ## Included Hardening
 
-- The OpenAI API key never leaves the server.
+- OpenAI and ElevenLabs API keys never leave the server.
 - General app access can be protected by an `scrypt` password hash.
 - Ephemeral `client_secret` credentials have a short TTL.
 - The token endpoint is rate-limited by client IP.
@@ -136,6 +150,7 @@ The app login:
 - The UI uses a separate admin `HttpOnly` session cookie to enable destructive admin actions in the browser.
 - The memory extractor uses a conservative policy and drops sensitive or low-confidence data.
 - Persistent memory is injected into Realtime as a `conversation.item.create` with role `user`, avoiding the mix of user-derived content into `instructions`.
+- Persistent memory is sent to ElevenLabs sessions as contextual updates.
 - Web search stays out of the voice critical path: Realtime only decides when to use it, and the backend resolves it separately with `gpt-5-nano` plus caching.
 
 ## Local Build Without Docker

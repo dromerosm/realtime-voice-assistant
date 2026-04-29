@@ -7,6 +7,18 @@ export type AppRuntimeConfig = {
     port: number;
     host: string;
   };
+  voiceProviders: {
+    default: "openai" | "elevenlabs";
+    openai: {
+      enabled: boolean;
+    };
+    elevenlabs: {
+      enabled: boolean;
+      agentId: string;
+      participantName: string;
+      environment: string;
+    };
+  };
   realtime: {
     model: string;
     voice: string;
@@ -50,6 +62,18 @@ const defaultConfig: AppRuntimeConfig = {
   server: {
     port: 3000,
     host: "0.0.0.0"
+  },
+  voiceProviders: {
+    default: "openai",
+    openai: {
+      enabled: true
+    },
+    elevenlabs: {
+      enabled: false,
+      agentId: "",
+      participantName: "",
+      environment: "production"
+    }
   },
   realtime: {
     model: "gpt-realtime-1.5",
@@ -137,6 +161,11 @@ export const loadAppRuntimeConfig = (): AppRuntimeConfig => {
   }
 
   const server = isRecord(parsed.server) ? parsed.server : {};
+  const voiceProviders = isRecord(parsed.voiceProviders) ? parsed.voiceProviders : {};
+  const openaiProvider = isRecord(voiceProviders.openai) ? voiceProviders.openai : {};
+  const elevenlabsProvider = isRecord(voiceProviders.elevenlabs)
+    ? voiceProviders.elevenlabs
+    : {};
   const realtime = isRecord(parsed.realtime) ? parsed.realtime : {};
   const proxy = isRecord(parsed.proxy) ? parsed.proxy : {};
   const appLogin = isRecord(parsed.appLogin) ? parsed.appLogin : {};
@@ -151,10 +180,39 @@ export const loadAppRuntimeConfig = (): AppRuntimeConfig => {
       ? ipHeader
       : "";
 
+  const defaultVoiceProvider = readString(
+    voiceProviders.default,
+    defaultConfig.voiceProviders.default
+  );
+
   return {
     server: {
       port: readNumber(server.port, defaultConfig.server.port),
       host: readString(server.host, defaultConfig.server.host)
+    },
+    voiceProviders: {
+      default: defaultVoiceProvider === "elevenlabs" ? "elevenlabs" : "openai",
+      openai: {
+        enabled: readBoolean(openaiProvider.enabled, defaultConfig.voiceProviders.openai.enabled)
+      },
+      elevenlabs: {
+        enabled: readBoolean(
+          elevenlabsProvider.enabled,
+          defaultConfig.voiceProviders.elevenlabs.enabled
+        ),
+        agentId: readString(
+          elevenlabsProvider.agentId,
+          defaultConfig.voiceProviders.elevenlabs.agentId
+        ),
+        participantName: readString(
+          elevenlabsProvider.participantName,
+          defaultConfig.voiceProviders.elevenlabs.participantName
+        ),
+        environment: readString(
+          elevenlabsProvider.environment,
+          defaultConfig.voiceProviders.elevenlabs.environment
+        )
+      }
     },
     realtime: {
       model: readString(realtime.model, defaultConfig.realtime.model),

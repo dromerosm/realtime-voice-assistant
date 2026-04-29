@@ -11,6 +11,16 @@ const appRuntimeConfig = loadAppRuntimeConfig();
 const port = appRuntimeConfig.server.port;
 const host = appRuntimeConfig.server.host;
 const openAiApiKey = process.env.OPENAI_API_KEY;
+const elevenLabsApiKey =
+  process.env.ELEVENLABS_API_KEY?.trim() || process.env.ELEVEN_LABS_API_KEY?.trim() || "";
+const elevenLabsAgentId =
+  process.env.ELEVENLABS_AGENT_ID?.trim() || appRuntimeConfig.voiceProviders.elevenlabs.agentId;
+const elevenLabsParticipantName =
+  process.env.ELEVENLABS_PARTICIPANT_NAME?.trim() ||
+  appRuntimeConfig.voiceProviders.elevenlabs.participantName;
+const elevenLabsEnvironment = appRuntimeConfig.voiceProviders.elevenlabs.environment;
+const openAiProviderEnabled = appRuntimeConfig.voiceProviders.openai.enabled;
+const elevenLabsProviderEnabled = appRuntimeConfig.voiceProviders.elevenlabs.enabled;
 const realtimeModel = appRuntimeConfig.realtime.model;
 const realtimeVoice = appRuntimeConfig.realtime.voice;
 const transcriptionModel = appRuntimeConfig.realtime.transcriptionModel;
@@ -75,6 +85,17 @@ type TokenResponseBody = {
   value?: string;
   expires_at?: number;
   session?: {
+    id?: string;
+    model?: string;
+    voice?: string;
+  };
+  bootstrapUserMessage?: string | null;
+};
+
+type ElevenLabsTokenResponseBody = {
+  provider: "elevenlabs";
+  conversationToken: string;
+  session: {
     id?: string;
     model?: string;
     voice?: string;
@@ -218,8 +239,14 @@ if (trustedProxyIpHeader && !trustedProxyIpHeaders.has(trustedProxyIpHeader)) {
 }
 
 const buildContentSecurityPolicy = () => {
-  const scriptSources = ["'self'"];
-  const connectSources = ["'self'", "https://api.openai.com"];
+  const scriptSources = ["'self'", "blob:", "data:"];
+  const connectSources = [
+    "'self'",
+    "https://api.openai.com",
+    "https://api.elevenlabs.io",
+    "https://livekit.rtc.elevenlabs.io",
+    "wss://livekit.rtc.elevenlabs.io"
+  ];
   const frameSources = ["'none'"];
 
   if (turnstileSiteKey) {
@@ -1377,13 +1404,49 @@ const requireAppAuthentication = (request: IncomingMessage, response: ServerResp
   return false;
 };
 
+const getDefaultVoiceProvider = () => {
+  const configuredDefault = appRuntimeConfig.voiceProviders.default;
+  if (
+    configuredDefault === "elevenlabs" &&
+    elevenLabsProviderEnabled &&
+    elevenLabsApiKey &&
+    elevenLabsAgentId
+  ) {
+    return "elevenlabs";
+  }
+
+  if (openAiProviderEnabled && openAiApiKey) {
+    return "openai";
+  }
+
+  if (elevenLabsProviderEnabled && elevenLabsApiKey && elevenLabsAgentId) {
+    return "elevenlabs";
+  }
+
+  return configuredDefault;
+};
+
 const handleAppConfigRequest = (request: IncomingMessage, response: ServerResponse) => {
   const appAuthenticated = isAppSessionAuthenticated(request);
   sendJson(response, 200, {
     authEnabled: appLoginEnabled,
     appAuthenticated,
     tokenEndpoint: "/api/realtime/token",
+    elevenLabsTokenEndpoint: "/api/elevenlabs/conversation-token",
     tokenMethod: "POST",
+    voiceProviders: {
+      default: getDefaultVoiceProvider(),
+      openai: {
+        enabled: openAiProviderEnabled,
+        configured: Boolean(openAiApiKey),
+        label: "OpenAI Realtime"
+      },
+      elevenlabs: {
+        enabled: elevenLabsProviderEnabled,
+        configured: Boolean(elevenLabsApiKey && elevenLabsAgentId),
+        label: "ElevenLabs"
+      }
+    },
     turnstileSiteKey: turnstileSiteKey || null,
     memoryEnabled,
     memoryResetAvailable: Boolean(memoryAdminToken),
@@ -1557,6 +1620,13 @@ const handleTokenRequest = async (request: IncomingMessage, response: ServerResp
     return;
   }
 
+  if (!openAiProviderEnabled) {
+    sendJson(response, 404, {
+      error: "OpenAI voice provider is not enabled."
+    });
+    return;
+  }
+
   if (!openAiApiKey) {
     sendJson(response, 500, {
       error: "OPENAI_API_KEY is not configured on the server."
@@ -1637,6 +1707,127 @@ const handleTokenRequest = async (request: IncomingMessage, response: ServerResp
     console.error("Unexpected token mint error", message);
     sendJson(response, 500, {
       error: "Unexpected error while creating the ephemeral token."
+    });
+  }
+};
+
+const handleElevenLabsConversationTokenRequest = async (
+  request: IncomingMessage,
+  response: ServerResponse
+) => {
+  if (!requireAppAuthentication(request, response)) {
+    return;
+  }
+
+  if (!elevenLabsProviderEnabled) {
+    sendJson(response, 404, {
+      error: "ElevenLabs voice provider is not enabled."
+    });
+    return;
+  }
+
+  if (!elevenLabsApiKey) {
+    sendJson(response, 500, {
+      error: "ELEVENLABS_API_KEY is not configured on the server."
+    });
+    return;
+  }
+
+  if (!elevenLabsAgentId) {
+    sendJson(response, 500, {
+      error: "ELEVENLABS_AGENT_ID is not configured on the server."
+    });
+    return;
+  }
+
+  if (!requireAllowedOrigin(request, response)) {
+    return;
+  }
+
+  const clientIp = getClientIp(request);
+  const rateLimitState = checkRateLimit(
+    tokenRateLimit,
+    `elevenlabs:${clientIp}`,
+    tokenRateLimitWindowMs,
+    tokenRateLimitMaxRequests
+  );
+  if (!rateLimitState.allowed) {
+    response.setHeader("Retry-After", String(rateLimitState.retryAfterSeconds));
+    sendJson(response, 429, {
+      error: "Too many token requests. Try again later."
+    });
+    return;
+  }
+
+  try {
+    const body = await parseJsonBody<TokenRequestBody>(request);
+    const turnstileOk = await verifyTurnstile(body.turnstileToken, clientIp);
+    if (!turnstileOk) {
+      sendJson(response, 403, {
+        error: "Human verification failed."
+      });
+      return;
+    }
+
+    const params = new URLSearchParams({
+      agent_id: elevenLabsAgentId
+    });
+    if (elevenLabsParticipantName) {
+      params.set("participant_name", elevenLabsParticipantName);
+    }
+    if (elevenLabsEnvironment) {
+      params.set("environment", elevenLabsEnvironment);
+    }
+
+    const upstreamResponse = await fetch(
+      `https://api.elevenlabs.io/v1/convai/conversation/token?${params.toString()}`,
+      {
+        method: "GET",
+        headers: {
+          "xi-api-key": elevenLabsApiKey
+        }
+      }
+    );
+
+    const responseText = await upstreamResponse.text();
+    if (!upstreamResponse.ok) {
+      console.error("ElevenLabs conversation token mint failed", {
+        status: upstreamResponse.status,
+        body: responseText
+      });
+      sendJson(response, 502, {
+        error: "Failed to mint ElevenLabs conversation token."
+      });
+      return;
+    }
+
+    const parsed = JSON.parse(responseText) as {
+      token?: string;
+    };
+
+    if (!parsed.token) {
+      sendJson(response, 502, {
+        error: "ElevenLabs token response did not include a token."
+      });
+      return;
+    }
+
+    const responseBody: ElevenLabsTokenResponseBody = {
+      provider: "elevenlabs",
+      conversationToken: parsed.token,
+      session: {
+        model: "ElevenLabs Agent",
+        voice: "agent default"
+      },
+      bootstrapUserMessage: buildBootstrapUserMessage()
+    };
+
+    sendJson(response, 200, responseBody);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown ElevenLabs token error";
+    console.error("Unexpected ElevenLabs token mint error", message);
+    sendJson(response, 500, {
+      error: "Unexpected error while creating the ElevenLabs conversation token."
     });
   }
 };
@@ -1903,6 +2094,11 @@ const requestHandler = async (request: IncomingMessage, response: ServerResponse
 
   if (request.method === "POST" && url.pathname === "/api/realtime/token") {
     await handleTokenRequest(request, response);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/elevenlabs/conversation-token") {
+    await handleElevenLabsConversationTokenRequest(request, response);
     return;
   }
 

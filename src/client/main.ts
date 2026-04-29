@@ -1,10 +1,23 @@
 import "./styles.css";
+import { Conversation, type VoiceConversation } from "@elevenlabs/client";
 
 type AppStatus = "idle" | "connecting" | "listening" | "speaking" | "error";
+type VoiceProvider = "openai" | "elevenlabs";
 
-type TokenResponse = {
+type OpenAiTokenResponse = {
   value: string;
   expires_at?: number;
+  session?: {
+    id?: string;
+    model?: string;
+    voice?: string;
+  };
+  bootstrapUserMessage?: string | null;
+};
+
+type ElevenLabsTokenResponse = {
+  provider: "elevenlabs";
+  conversationToken: string;
   session?: {
     id?: string;
     model?: string;
@@ -17,7 +30,21 @@ type AppConfig = {
   authEnabled: boolean;
   appAuthenticated: boolean;
   tokenEndpoint: string;
+  elevenLabsTokenEndpoint: string;
   tokenMethod: "POST";
+  voiceProviders: {
+    default: VoiceProvider;
+    openai: {
+      enabled: boolean;
+      configured: boolean;
+      label: string;
+    };
+    elevenlabs: {
+      enabled: boolean;
+      configured: boolean;
+      label: string;
+    };
+  };
   turnstileSiteKey: string | null;
   memoryEnabled: boolean;
   memoryResetAvailable: boolean;
@@ -173,6 +200,8 @@ const loginForm = document.querySelector<HTMLFormElement>("#loginForm");
 const loginPasswordInput = document.querySelector<HTMLInputElement>("#loginPasswordInput");
 const loginSubmitButton = document.querySelector<HTMLButtonElement>("#loginSubmitButton");
 const loginStatus = document.querySelector<HTMLElement>("#loginStatus");
+const openAiProviderInput = document.querySelector<HTMLInputElement>("#providerOpenai");
+const elevenLabsProviderInput = document.querySelector<HTMLInputElement>("#providerElevenlabs");
 const connectButton = document.querySelector<HTMLButtonElement>("#connectButton");
 const hangupButton = document.querySelector<HTMLButtonElement>("#hangupButton");
 const logoutButton = document.querySelector<HTMLButtonElement>("#logoutButton");
@@ -181,6 +210,7 @@ const resetMemoryButton = document.querySelector<HTMLButtonElement>("#resetMemor
 const statusValue = document.querySelector<HTMLElement>("#statusValue");
 const sessionValue = document.querySelector<HTMLElement>("#sessionValue");
 const usageValue = document.querySelector<HTMLElement>("#usageValue");
+const providerValue = document.querySelector<HTMLElement>("#providerValue");
 const ambientCanvas = document.querySelector<HTMLCanvasElement>("#ambientCanvas");
 const ambientModeBadge = document.querySelector<HTMLElement>("#ambientModeBadge");
 const webSearchPanel = document.querySelector<HTMLElement>("#webSearchPanel");
@@ -202,6 +232,8 @@ if (
   !loginPasswordInput ||
   !loginSubmitButton ||
   !loginStatus ||
+  !openAiProviderInput ||
+  !elevenLabsProviderInput ||
   !connectButton ||
   !hangupButton ||
   !logoutButton ||
@@ -210,6 +242,7 @@ if (
   !statusValue ||
   !sessionValue ||
   !usageValue ||
+  !providerValue ||
   !ambientCanvas ||
   !ambientModeBadge ||
   !webSearchPanel ||
@@ -529,6 +562,9 @@ let peerConnection: RTCPeerConnection | null = null;
 let dataChannel: RTCDataChannel | null = null;
 let localStream: MediaStream | null = null;
 let remoteAudio: HTMLAudioElement | null = null;
+let elevenLabsConversation: VoiceConversation | null = null;
+let elevenLabsAudioMeterFrame: number | null = null;
+let elevenLabsMessageCounter = 0;
 let remoteAudioContext: AudioContext | null = null;
 let remoteAnalyser: AnalyserNode | null = null;
 let remoteAnalyserData: Uint8Array<ArrayBuffer> | null = null;
@@ -536,6 +572,7 @@ let remoteAudioSource: MediaStreamAudioSourceNode | null = null;
 let remoteAudioMeterFrame: number | null = null;
 let currentSessionId = "sin conexión";
 let status: AppStatus = "idle";
+let selectedVoiceProvider: VoiceProvider = "openai";
 const transcriptEntries = new Map<string, TranscriptEntry>();
 const assistantMessageOrder = new Map<string, string>();
 let appConfig: AppConfig | null = null;
@@ -556,6 +593,28 @@ const WEB_SEARCH_RESPONSE_INSTRUCTIONS =
   "Responde en espanol usando el resultado de la tool web_search. Ve directo a la respuesta final y no menciones detalles internos de tools.";
 
 const isAppAccessGranted = () => !appConfig?.authEnabled || Boolean(appConfig?.appAuthenticated);
+const isProviderConfigured = (provider: VoiceProvider) => {
+  const providerConfig = appConfig?.voiceProviders[provider];
+  return Boolean(providerConfig?.enabled && providerConfig.configured);
+};
+
+const getActiveProviderLabel = () =>
+  selectedVoiceProvider === "elevenlabs"
+    ? (appConfig?.voiceProviders.elevenlabs.label ?? "ElevenLabs")
+    : (appConfig?.voiceProviders.openai.label ?? "OpenAI Realtime");
+
+const isConversationConnected = () => Boolean(peerConnection || elevenLabsConversation);
+
+const getStoredVoiceProvider = (): VoiceProvider | null => {
+  const stored = window.localStorage.getItem("voiceProvider");
+  return stored === "openai" || stored === "elevenlabs" ? stored : null;
+};
+
+const setSelectedVoiceProvider = (provider: VoiceProvider) => {
+  selectedVoiceProvider = provider;
+  window.localStorage.setItem("voiceProvider", provider);
+  syncProviderControls();
+};
 
 const setLoginMessage = (message: string, state: "info" | "error" = "info") => {
   loginStatus.textContent = message;
@@ -583,6 +642,22 @@ const syncAppAccessUi = () => {
       });
     });
   }
+};
+
+const syncProviderControls = () => {
+  const accessGranted = isAppAccessGranted();
+  const connected = isConversationConnected();
+  const openAiEnabled = isProviderConfigured("openai");
+  const elevenLabsEnabled = isProviderConfigured("elevenlabs");
+
+  openAiProviderInput.checked = selectedVoiceProvider === "openai";
+  elevenLabsProviderInput.checked = selectedVoiceProvider === "elevenlabs";
+  openAiProviderInput.disabled = !accessGranted || connected || !openAiEnabled;
+  elevenLabsProviderInput.disabled = !accessGranted || connected || !elevenLabsEnabled;
+  providerValue.textContent = getActiveProviderLabel();
+
+  openAiProviderInput.parentElement?.classList.toggle("disabled", !openAiEnabled);
+  elevenLabsProviderInput.parentElement?.classList.toggle("disabled", !elevenLabsEnabled);
 };
 
 const readErrorMessage = async (response: Response, fallback: string) => {
@@ -685,6 +760,33 @@ const startRemoteAudioMeter = async (stream: MediaStream) => {
   }
 };
 
+const stopElevenLabsAudioMeter = () => {
+  if (elevenLabsAudioMeterFrame !== null) {
+    window.cancelAnimationFrame(elevenLabsAudioMeterFrame);
+    elevenLabsAudioMeterFrame = null;
+  }
+};
+
+const startElevenLabsAudioMeter = (conversation: VoiceConversation) => {
+  stopElevenLabsAudioMeter();
+
+  const tick = () => {
+    if (elevenLabsConversation !== conversation) {
+      return;
+    }
+
+    try {
+      ambientScene.setAudioLevel(conversation.getOutputVolume());
+    } catch {
+      ambientScene.setAudioLevel(0);
+    }
+
+    elevenLabsAudioMeterFrame = window.requestAnimationFrame(tick);
+  };
+
+  elevenLabsAudioMeterFrame = window.requestAnimationFrame(tick);
+};
+
 const sendRealtimeClientEvent = (event: RealtimeClientEvent) => {
   if (!dataChannel || dataChannel.readyState !== "open") {
     return false;
@@ -713,6 +815,15 @@ const sendBootstrapUserMessage = (text: string) => {
       ]
     }
   });
+};
+
+const sendProviderContext = (text: string) => {
+  if (elevenLabsConversation) {
+    elevenLabsConversation.sendContextualUpdate(text);
+    return;
+  }
+
+  sendBootstrapUserMessage(text);
 };
 
 const removeTranscriptEntry = (id: string) => {
@@ -845,6 +956,23 @@ const parseWebSearchToolArguments = (value?: string) => {
   }
 };
 
+const parseElevenLabsWebSearchParameters = (parameters: unknown) => {
+  if (typeof parameters !== "object" || parameters === null) {
+    return null;
+  }
+
+  const record = parameters as Record<string, unknown>;
+  const query = typeof record.query === "string" ? record.query.trim() : "";
+  if (!query) {
+    return null;
+  }
+
+  return {
+    query,
+    freshness: normalizeWebSearchFreshness(record.freshness)
+  };
+};
+
 const executeWebSearch = async (query: string, freshness: WebSearchFreshness) => {
   const response = await fetch("/api/tools/web-search", {
     method: "POST",
@@ -863,6 +991,37 @@ const executeWebSearch = async (query: string, freshness: WebSearchFreshness) =>
   }
 
   return (await response.json()) as WebSearchResult;
+};
+
+const executeElevenLabsWebSearchTool = async (parameters: unknown) => {
+  const args = parseElevenLabsWebSearchParameters(parameters);
+  const callId = `elevenlabs-web-search-${Date.now()}`;
+  startToolWaitFeedback(callId);
+  startWebSearchStatus(callId, args?.query ?? "Consulta web en preparación...");
+
+  try {
+    if (!args) {
+      throw new Error("Invalid web_search arguments.");
+    }
+
+    const result = await executeWebSearch(args.query, args.freshness);
+    return JSON.stringify(result);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "No se pudo completar la búsqueda web.";
+    return JSON.stringify({
+      ok: false,
+      error: message
+    });
+  } finally {
+    const entryId = toolWaitEntryIds.get(callId);
+    if (entryId) {
+      removeTranscriptEntry(entryId);
+    }
+    toolWaitEntryIds.delete(callId);
+    clearWebSearchStatus(callId);
+    setStatus("listening", "esperando siguiente turno");
+  }
 };
 
 const sendFunctionCallOutput = (callId: string, output: unknown) => {
@@ -931,7 +1090,8 @@ const handleWebSearchToolCall = async (
 };
 
 const sendMemoryBootstrapRefresh = async (bootstrapUserMessage?: string | null) => {
-  if (!peerConnection || !dataChannel || dataChannel.readyState !== "open") {
+  const openAiConnected = Boolean(peerConnection && dataChannel?.readyState === "open");
+  if (!openAiConnected && !elevenLabsConversation) {
     return;
   }
 
@@ -960,7 +1120,7 @@ const sendMemoryBootstrapRefresh = async (bootstrapUserMessage?: string | null) 
     return;
   }
 
-  sendBootstrapUserMessage(nextMessage);
+  sendProviderContext(nextMessage);
 };
 
 const setStatus = (nextStatus: AppStatus, message?: string) => {
@@ -978,11 +1138,36 @@ const setUsage = (value: string) => {
   usageValue.textContent = value;
 };
 
+const describeElevenLabsDisconnect = (details: {
+  reason: string;
+  message?: string;
+  closeCode?: number;
+  closeReason?: string;
+}) => {
+  const parts = [
+    details.reason === "agent"
+      ? "ElevenLabs cerró la sesión"
+      : details.message || "ElevenLabs desconectó la sesión"
+  ];
+
+  if (typeof details.closeCode === "number") {
+    parts.push(`code ${details.closeCode}`);
+  }
+
+  if (details.closeReason) {
+    parts.push(details.closeReason);
+  }
+
+  return parts.join(" · ");
+};
+
 const syncButtons = () => {
-  const connected = Boolean(peerConnection);
+  const connected = isConversationConnected();
   const accessGranted = isAppAccessGranted();
-  connectButton.disabled = !accessGranted || connected || status === "connecting";
+  connectButton.disabled =
+    !accessGranted || connected || status === "connecting" || !isProviderConfigured(selectedVoiceProvider);
   hangupButton.disabled = !connected;
+  syncProviderControls();
 };
 
 const syncMemoryControls = () => {
@@ -1250,6 +1435,14 @@ const closeConnection = () => {
   clearToolWaitFeedback();
   clearWebSearchStatus();
   pendingToolCallIds.clear();
+
+  const activeElevenLabsConversation = elevenLabsConversation;
+  elevenLabsConversation = null;
+  stopElevenLabsAudioMeter();
+  void activeElevenLabsConversation?.endSession().catch((error: unknown) => {
+    console.warn("ElevenLabs session could not end cleanly", error);
+  });
+
   dataChannel?.close();
   dataChannel = null;
 
@@ -1281,7 +1474,17 @@ const loadAppConfig = async () => {
   }
 
   appConfig = (await response.json()) as AppConfig;
+  const storedProvider = getStoredVoiceProvider();
+  selectedVoiceProvider =
+    storedProvider && isProviderConfigured(storedProvider)
+      ? storedProvider
+      : isProviderConfigured(appConfig.voiceProviders.default)
+        ? appConfig.voiceProviders.default
+        : isProviderConfigured("openai")
+          ? "openai"
+          : "elevenlabs";
   syncAppAccessUi();
+  syncProviderControls();
   syncButtons();
   syncMemoryControls();
   renderMemory();
@@ -1681,8 +1884,8 @@ const handleRealtimeEvent = (event: RealtimeEvent) => {
   }
 };
 
-const connect = async () => {
-  if (peerConnection) {
+const connectOpenAi = async () => {
+  if (isConversationConnected()) {
     return;
   }
 
@@ -1719,7 +1922,7 @@ const connect = async () => {
       throw new Error(`Token request failed with status ${tokenResponse.status}`);
     }
 
-    const tokenData = (await tokenResponse.json()) as TokenResponse;
+    const tokenData = (await tokenResponse.json()) as OpenAiTokenResponse;
     if (!tokenData.value) {
       throw new Error("Token endpoint did not return an ephemeral key.");
     }
@@ -1823,6 +2026,152 @@ const connect = async () => {
   }
 };
 
+const connectElevenLabs = async () => {
+  if (isConversationConnected()) {
+    return;
+  }
+
+  setStatus("connecting");
+  syncButtons();
+
+  try {
+    if (!appConfig) {
+      await loadAppConfig();
+    }
+
+    if (!isAppAccessGranted()) {
+      throw new Error("Debes iniciar sesión antes de conectar.");
+    }
+
+    if (!isProviderConfigured("elevenlabs")) {
+      throw new Error("ElevenLabs no está configurado en el servidor.");
+    }
+
+    if (appConfig?.turnstileSiteKey && !turnstileToken) {
+      throw new Error("Completa la verificación humana antes de conectar.");
+    }
+
+    const tokenResponse = await fetch(
+      appConfig?.elevenLabsTokenEndpoint ?? "/api/elevenlabs/conversation-token",
+      {
+        method: appConfig?.tokenMethod ?? "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          turnstileToken
+        })
+      }
+    );
+    if (!tokenResponse.ok) {
+      if (tokenResponse.status === 401) {
+        await loadAppConfig();
+        throw new Error(await readErrorMessage(tokenResponse, "Debes iniciar sesión otra vez."));
+      }
+      throw new Error(await readErrorMessage(tokenResponse, `ElevenLabs token failed with status ${tokenResponse.status}`));
+    }
+
+    const tokenData = (await tokenResponse.json()) as ElevenLabsTokenResponse;
+    if (!tokenData.conversationToken) {
+      throw new Error("ElevenLabs token endpoint did not return a conversation token.");
+    }
+
+    const conversation = await Conversation.startSession({
+      conversationToken: tokenData.conversationToken,
+      connectionType: "webrtc",
+      textOnly: false,
+      clientTools: {
+        web_search: executeElevenLabsWebSearchTool
+      },
+      onConnect: ({ conversationId }) => {
+        setSession(conversationId);
+        setStatus("listening", "conectado");
+      },
+      onDisconnect: (details) => {
+        console.warn("ElevenLabs disconnected", details);
+        if (elevenLabsConversation) {
+          elevenLabsConversation = null;
+          stopElevenLabsAudioMeter();
+          if (details.reason === "error") {
+            resetState();
+            setStatus("error", describeElevenLabsDisconnect(details));
+          } else {
+            resetState();
+            setStatus(
+              "idle",
+              details.reason === "agent" ? describeElevenLabsDisconnect(details) : undefined
+            );
+          }
+          syncButtons();
+        }
+      },
+      onStatusChange: ({ status: conversationStatus }) => {
+        if (conversationStatus === "connecting") {
+          setStatus("connecting");
+        }
+        if (conversationStatus === "connected") {
+          setStatus("listening", "conectado");
+        }
+      },
+      onModeChange: ({ mode }) => {
+        setStatus(mode === "speaking" ? "speaking" : "listening");
+      },
+      onMessage: (message) => {
+        const entryId = `elevenlabs:${message.role}:${message.event_id ?? ++elevenLabsMessageCounter}`;
+        const role: TranscriptRole = message.role === "user" ? "user" : "assistant";
+        if (role === "assistant") {
+          ambientScene.pulseFromText(message.message);
+        }
+        upsertTranscriptEntry(entryId, role, () => ({
+          id: entryId,
+          role,
+          text: message.message,
+          pending: false
+        }));
+        if (role === "user") {
+          void sendMemoryIngest(entryId, message.message);
+        }
+      },
+      onError: (message) => {
+        console.error("ElevenLabs error", message);
+        setStatus("error", message);
+      },
+      onDebug: (info) => {
+        console.debug("ElevenLabs debug", info);
+      }
+    });
+
+    elevenLabsConversation = conversation;
+    startElevenLabsAudioMeter(conversation);
+    setUsage("ElevenLabs");
+
+    if (tokenData.bootstrapUserMessage) {
+      sendProviderContext(tokenData.bootstrapUserMessage);
+    }
+
+    if (turnstileWidgetId && window.turnstile) {
+      turnstileToken = "";
+      window.turnstile.reset(turnstileWidgetId);
+    }
+
+    syncButtons();
+  } catch (error) {
+    closeConnection();
+    const message = error instanceof Error ? error.message : "Unknown error";
+    setStatus("error", message);
+    syncButtons();
+  }
+};
+
+const connect = async () => {
+  if (selectedVoiceProvider === "elevenlabs") {
+    await connectElevenLabs();
+    return;
+  }
+
+  await connectOpenAi();
+};
+
 loginForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void submitAppLogin();
@@ -1830,6 +2179,18 @@ loginForm.addEventListener("submit", (event) => {
 
 connectButton.addEventListener("click", () => {
   void connect();
+});
+
+openAiProviderInput.addEventListener("change", () => {
+  if (openAiProviderInput.checked) {
+    setSelectedVoiceProvider("openai");
+  }
+});
+
+elevenLabsProviderInput.addEventListener("change", () => {
+  if (elevenLabsProviderInput.checked) {
+    setSelectedVoiceProvider("elevenlabs");
+  }
 });
 
 hangupButton.addEventListener("click", () => {
@@ -1851,6 +2212,7 @@ resetMemoryButton.addEventListener("click", () => {
 renderTranscript();
 renderWebSearchStatus();
 renderMemory();
+syncProviderControls();
 syncButtons();
 syncMemoryControls();
 setSession(currentSessionId);

@@ -22,6 +22,8 @@ The app already includes:
 Secrets only:
 
 - `OPENAI_API_KEY`
+- `ELEVENLABS_API_KEY` or `ELEVEN_LABS_API_KEY`
+- `ELEVENLABS_AGENT_ID`
 - `APP_LOGIN_PASSWORD_HASH`
 - `APP_SESSION_SECRET`
 - `MEMORY_ADMIN_TOKEN`
@@ -41,6 +43,7 @@ If the repo is public, keep those infrastructure credentials outside the project
 All non-sensitive settings:
 
 - `server`
+- `voiceProviders`
 - `realtime`
 - `proxy`
 - `appLogin`
@@ -84,6 +87,9 @@ All non-sensitive settings:
 Configure at least:
 
 - `OPENAI_API_KEY`
+- `ELEVENLABS_API_KEY` or `ELEVEN_LABS_API_KEY` if `voiceProviders.elevenlabs.enabled=true`
+- `ELEVENLABS_AGENT_ID` if `voiceProviders.elevenlabs.enabled=true`
+- ElevenLabs API key permissions must include Conversational AI token access.
 - `realtime.allowedOrigins=["https://<your-domain>"]` in `app.config.json`
 - `appLogin.enabled=true` in `app.config.json`
 - `APP_LOGIN_PASSWORD_HASH=scrypt$<saltBase64>$<derivedKeyBase64>`

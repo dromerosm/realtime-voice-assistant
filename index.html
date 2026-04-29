@@ -45,15 +45,27 @@
 
     <main id="appShell" class="app-shell" hidden>
       <section class="hero">
-        <p class="eyebrow">OpenAI Realtime Voice POC</p>
+        <p class="eyebrow">Realtime Voice POC</p>
         <h1>Asistente de voz en tiempo real</h1>
         <p class="hero-copy">
-          WebRTC directo con <code>gpt-realtime-1.5</code>, transcript en vivo y
-          memoria durante la sesión actual.
+          WebRTC con proveedor seleccionable, transcript en vivo y memoria persistente ligera.
         </p>
       </section>
 
       <section class="panel controls-panel">
+        <fieldset class="provider-fieldset">
+          <legend>Proveedor de conversación</legend>
+          <div class="provider-toggle" role="radiogroup" aria-label="Proveedor de conversación">
+            <label class="provider-option">
+              <input id="providerOpenai" type="radio" name="voiceProvider" value="openai" checked />
+              <span>OpenAI</span>
+            </label>
+            <label class="provider-option">
+              <input id="providerElevenlabs" type="radio" name="voiceProvider" value="elevenlabs" />
+              <span>ElevenLabs</span>
+            </label>
+          </div>
+        </fieldset>
         <div class="controls">
           <button id="connectButton" class="primary">Connect</button>
           <button id="hangupButton" class="secondary" disabled>Hang up</button>
@@ -73,6 +85,10 @@
           <div>
             <span class="status-label">Último uso</span>
             <strong id="usageValue">n/d</strong>
+          </div>
+          <div>
+            <span class="status-label">Proveedor</span>
+            <strong id="providerValue">OpenAI Realtime</strong>
           </div>
         </div>
       </section>
@@ -140,7 +156,7 @@
       <section class="panel notes-panel">
         <h2>Notas</h2>
         <ul>
-          <li>El audio viaja por WebRTC directamente entre navegador y OpenAI.</li>
+          <li>El audio viaja por WebRTC directamente entre navegador y el proveedor elegido.</li>
           <li>
             La conversación se reinicia al recargar, pero pueden mantenerse
             preferencias y hechos estables mediante memoria persistente ligera.

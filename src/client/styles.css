@@ -136,6 +136,67 @@ code {
   padding: 1.1rem;
 }
 
+.provider-fieldset {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  border: 0;
+}
+
+.provider-fieldset legend {
+  padding: 0;
+  color: #9ba5b6;
+  font-size: 0.84rem;
+}
+
+.provider-toggle {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.22rem;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.provider-option {
+  position: relative;
+  display: grid;
+  min-width: 8rem;
+  place-items: center;
+  color: #b7c0cf;
+  cursor: pointer;
+}
+
+.provider-option input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.provider-option span {
+  width: 100%;
+  padding: 0.58rem 0.9rem;
+  border-radius: 999px;
+  text-align: center;
+}
+
+.provider-option input:checked + span {
+  background: rgba(237, 138, 56, 0.9);
+  color: #fffaf2;
+}
+
+.provider-option.disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.provider-option.disabled input {
+  cursor: not-allowed;
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
@@ -188,7 +249,7 @@ input {
 
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1rem;
 }
 
@@ -505,6 +566,16 @@ input {
 
   .controls {
     flex-direction: column;
+    align-items: stretch;
+  }
+
+  .provider-toggle {
+    width: 100%;
+  }
+
+  .provider-option {
+    min-width: 0;
+    flex: 1;
   }
 
   .status-grid {
